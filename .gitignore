@@ -1,0 +1,25 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Benchmark outputs and generated data
+runs/
+outputs/
+data/
+*.ply
+*.glb
+*.npz
+!tests/**/*.npz
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

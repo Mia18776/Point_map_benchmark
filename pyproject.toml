@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pointmap-benchmark"
+version = "0.1.0"
+description = "Benchmark MapAnything, MASt3R, Pi3 and Depth Anything 3 on 3D point-map generation"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "numpy>=1.24",
+    "pillow>=9.0",
+]
+
+[project.optional-dependencies]
+# Faster Chamfer distance; a NumPy fallback is used when SciPy is absent.
+fast = ["scipy>=1.10"]
+dev = ["pytest>=7.0", "ruff>=0.4"]
+
+[tool.setuptools]
+packages = ["pointmap_bench"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

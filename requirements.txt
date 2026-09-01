@@ -1,0 +1,12 @@
+# Core requirements. The models themselves come from a source checkout of
+# map-anything (pip install -e /path/to/map-anything), which pulls in torch,
+# uniception, hydra-core, opencv and huggingface_hub.
+numpy>=1.24
+pillow>=9.0
+
+# Optional but recommended:
+#   scipy   - much faster Chamfer distance (a NumPy fallback is used without it)
+#   trimesh - GLB export (already a map-anything dependency)
+#   pytest  - to run the test suite
+scipy>=1.10
+pytest>=7.0
