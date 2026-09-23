@@ -34,11 +34,25 @@ and non-metric models are directly comparable.
 | `consistency/rel_depth_err_median` | median relative depth disagreement when each view's points are reprojected into the other views |
 | `consistency/inlier_{1.03,1.05,1.25}` | fraction of reprojected points agreeing within that ratio |
 | `consistency/overlap_ratio` | fraction of reprojected points that land inside the target view (context, not a score) |
+| `sanity/pose_pointmap_rel_err` | harness check: does `poses_c2w @ points_cam` reproduce `points_world`? |
+| `sanity/depth_pointmap_rel_err` | harness check: does back-projecting `depth_z` through `intrinsics` reproduce `points_cam`? |
 
 The consistency metric is the core GT-free signal: a reconstruction that is
 globally coherent agrees with itself when you look at the same surface from a
 different camera. Genuinely occluded points count as disagreements, so robust
 statistics (median, inlier ratios) are reported rather than a mean.
+
+Read it as a necessary condition, not a ranking: a degenerate prediction that
+puts every pixel on one fronto-parallel plane is perfectly self-consistent. It
+catches reconstructions that contradict themselves; it cannot certify one that
+is merely wrong.
+
+The two `sanity/*` numbers score the benchmark, not the model. They check
+identities that hold for any correct wrapper, whatever the model predicts, and
+must be ~0 for every model. A large value means some convention is being
+translated wrongly (a world-to-camera pose where camera-to-world is expected,
+say), and that model's other numbers must not be trusted - which is much better
+than reading a broken harness as "this model is bad".
 
 ### With ground truth
 
@@ -58,6 +72,22 @@ after similarity alignment of the camera centres).
 `sim3/*` also reports Chamfer accuracy (prediction → GT) and completeness
 (GT → prediction), both raw and normalised by the GT scene extent so scenes of
 different physical size can be averaged.
+
+Two details that decide whether the comparison is fair:
+
+* **Accuracy is measured on the pixels a model predicted; completeness is
+  measured against the whole ground truth.** Otherwise a model that masks away
+  the hard half of a scene would score a perfect completeness on the half it
+  kept. `gt/covered_ratio` reports how much of the GT each model actually
+  predicted and sits next to the accuracy columns in the report, because
+  accuracy and coverage trade off directly.
+* **The similarity fit is robust** (RANSAC-seeded trimmed least squares), so a
+  diverging patch in one prediction cannot drag the alignment and corrupt every
+  error built on it. `sim3/median_ae_lsq*` reports the plain least-squares fit
+  for comparison; a large gap between the two medians means the prediction
+  carries real outlier mass. Compare the medians, not the means - a
+  least-squares fit can post the lower mean precisely by smearing its outliers
+  over every other point.
 
 ## Install
 
@@ -202,7 +232,10 @@ The tests pin down, among others: a perfect prediction scores perfectly; a
 prediction differing only by a global similarity transform still scores
 perfectly under `cam0/*` and `sim3/*` but is caught by `metric/*`; added noise
 strictly degrades every metric; the consistency metric is invariant to global
-scale and drops when one view is made inconsistent; and the GT depth survives
+scale and drops when one view is made inconsistent; a model that predicts only
+half the image is penalised on completeness but not on accuracy; the similarity
+fit survives 10% gross outliers that defeat a plain least-squares fit; the
+`sanity/*` check fires on a flipped pose convention; and the GT depth survives
 the crop-resize pipeline unchanged.
 
 Generate the same synthetic scene as real data to smoke-test the full run:
@@ -228,8 +261,14 @@ meaningful — use real data for real conclusions.
   `consistency/overlap_ratio` alongside it.
 * **MapAnything's masking is on by default**, matching its recommended usage.
   This removes edge and ambiguous pixels that other models keep, which raises
-  its accuracy and lowers its `cloud/valid_ratio`. Use `--no-mapanything-mask`
-  for a raw-density comparison.
+  its accuracy and lowers its `cloud/valid_ratio` and `gt/covered_ratio`. Read
+  those two columns next to every accuracy number, use `--no-mapanything-mask`
+  for a raw-density comparison, or equalise coverage across models with
+  `--confidence-percentile`.
+* **Models that failed on some scenes are averaged over fewer scenes.** The
+  report prints `num_scenes` in every table and warns at the top when the
+  models did not complete the same set, because averages over different scenes
+  are not comparable and nothing else would reveal it.
 * **Metric scale.** `metric/*` is only a fair criticism of models that claim
   metric output. Pi3 is affine-invariant by design; DA3's scale depends on the
   checkpoint.

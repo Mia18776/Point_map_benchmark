@@ -27,6 +27,7 @@ from pointmap_bench.geometry import (  # noqa: E402
     apply_sim3,
     depth_to_camera_points,
     depth_to_world_points,
+    invert_se3,
     pose_from_quat_trans,
     quat_xyzw_to_rotmat,
 )
@@ -295,3 +296,82 @@ def test_prediction_validates_shapes(scene):
             mask=scene["depth_z"] > 0,
             images=scene["images"],
         )
+
+
+def test_completeness_penalises_geometry_the_model_did_not_predict(scene):
+    """A model that predicts half the image must not score a perfect completeness.
+
+    Accuracy is measured on the pixels a model predicted, but completeness has
+    to be measured against the whole ground truth - otherwise masking away the
+    hard half of a scene looks like flawless reconstruction.
+    """
+    args = (scene["depth_z"], scene["intrinsics"], scene["poses_c2w"])
+    full = evaluate_with_gt(make_prediction(scene), *args)
+
+    partial_prediction = make_prediction(scene)
+    keep = np.ones_like(partial_prediction.mask)
+    keep[:, :, WIDTH // 2 :] = False
+    partial_prediction.mask = partial_prediction.mask & keep
+    partial = evaluate_with_gt(partial_prediction, *args)
+
+    assert full["gt/covered_ratio"] == pytest.approx(1.0, abs=1e-6)
+    assert partial["gt/covered_ratio"] < 0.6
+    # The half it did predict is still exactly right.
+    assert partial["sim3/accuracy_mean"] == pytest.approx(0.0, abs=1e-6)
+    # The half it skipped is not free.
+    assert full["sim3/completeness_mean"] == pytest.approx(0.0, abs=1e-6)
+    assert partial["sim3/completeness_mean"] > 1e-3
+
+
+def test_similarity_alignment_resists_outliers(scene):
+    """A few diverging points must not drag the alignment of everything else."""
+    points_world = depth_to_world_points(
+        scene["depth_z"], scene["intrinsics"], scene["poses_c2w"]
+    ).copy()
+    rng = np.random.default_rng(0)
+    outlier = rng.random(points_world.shape[:3]) < 0.1
+    points_world[outlier] += np.array([80.0, -60.0, 120.0])
+
+    result = evaluate_with_gt(
+        make_prediction(scene, points_world=points_world),
+        scene["depth_z"],
+        scene["intrinsics"],
+        scene["poses_c2w"],
+    )
+
+    # The 90% of points that are exact stay exact under the robust fit.
+    assert result["sim3/median_ae"] == pytest.approx(0.0, abs=1e-6)
+    assert result["sim3/inlier_l2_0.02"] > 0.85
+    # The plain least-squares fit is dragged off that geometry by the outliers.
+    # The comparison is on the medians: the least-squares fit minimises squared
+    # error, so it posts the lower *mean* by smearing the outliers over every
+    # other point, which is exactly the behaviour being guarded against.
+    assert result["sim3/median_ae_lsq"] > 1.0
+    assert result["sim3/mae_lsq"] < result["sim3/mae"]
+
+
+def test_metric_scale_is_not_reported_for_scale_ambiguous_models(scene):
+    metric_prediction = make_prediction(scene)
+    ambiguous_prediction = make_prediction(scene)
+    ambiguous_prediction.is_metric = False
+    args = (scene["depth_z"], scene["intrinsics"], scene["poses_c2w"])
+
+    assert "metric/scale_abs_rel" in evaluate_with_gt(metric_prediction, *args)
+    assert "metric/scale_abs_rel" not in evaluate_with_gt(ambiguous_prediction, *args)
+
+
+def test_sanity_check_catches_a_flipped_pose_convention(scene):
+    """The harness check must fire when poses and point maps disagree.
+
+    A wrapper returning world-to-camera where camera-to-world is expected would
+    otherwise show up as "this model is bad" rather than "this comparison is
+    broken", which is the failure mode this check exists to prevent.
+    """
+    healthy = evaluate_without_gt(make_prediction(scene))
+    assert healthy["sanity/pose_pointmap_rel_err"] == pytest.approx(0.0, abs=1e-9)
+    assert healthy["sanity/depth_pointmap_rel_err"] == pytest.approx(0.0, abs=1e-9)
+
+    broken_prediction = make_prediction(scene)
+    broken_prediction.poses_c2w = invert_se3(broken_prediction.poses_c2w)
+    broken = evaluate_without_gt(broken_prediction)
+    assert broken["sanity/pose_pointmap_rel_err"] > 0.1

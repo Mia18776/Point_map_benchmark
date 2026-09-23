@@ -27,6 +27,7 @@ __all__ = [
     "project_points",
     "optimal_scale",
     "umeyama_sim3",
+    "robust_umeyama_sim3",
     "apply_sim3",
     "rotation_angle_deg",
     "translation_angle_deg",
@@ -239,6 +240,86 @@ def umeyama_sim3(src: np.ndarray, dst: np.ndarray, with_scale: bool = True):
         scale = 1.0
 
     trans = mu_dst - scale * rot @ mu_src
+    return scale, rot, trans
+
+
+def robust_umeyama_sim3(
+    src: np.ndarray,
+    dst: np.ndarray,
+    trim_ratio: float = 0.2,
+    num_iterations: int = 3,
+    num_candidates: int = 64,
+    max_scoring_points: int = 20000,
+    seed: int = 0,
+):
+    """Outlier-tolerant similarity alignment of src onto dst.
+
+    :func:`umeyama_sim3` is a least-squares estimator, so a small cluster of
+    gross outliers - sky pixels, a diverging patch of one prediction - can drag
+    the alignment and corrupt every error computed on top of it.
+
+    Trimming alone does not fix that: when the initial fit is dominated by the
+    outliers, the smallest residuals no longer identify the inliers. So the
+    estimate is seeded by RANSAC over the (known) correspondences - the plain
+    fit plus a number of minimal three-point fits, each scored by its trimmed
+    squared residual - and the winner is then refined by trim-and-refit rounds.
+
+    Args:
+        src: (N, 3) source points.
+        dst: (N, 3) target points, in correspondence with ``src``.
+        trim_ratio: Fraction of the worst correspondences to discard. 0 makes
+            this exactly :func:`umeyama_sim3`.
+        num_iterations: Number of trim-and-refit rounds after seeding.
+        num_candidates: Minimal-sample hypotheses tried alongside the plain fit.
+        max_scoring_points: Cap on the points used to score a hypothesis.
+        seed: Seed of the deterministic sampling.
+
+    Returns:
+        Tuple (s, R, t), the same as :func:`umeyama_sim3`.
+    """
+    src = np.asarray(src, dtype=np.float64).reshape(-1, 3)
+    dst = np.asarray(dst, dtype=np.float64).reshape(-1, 3)
+    plain = umeyama_sim3(src, dst)
+    num = src.shape[0]
+    keep_count = max(3, int(round(num * (1.0 - trim_ratio))))
+    if trim_ratio <= 0.0 or num_iterations <= 0 or keep_count >= num:
+        return plain
+
+    rng = np.random.default_rng(seed)
+    score_idx = (
+        np.arange(num)
+        if num <= max_scoring_points
+        else rng.choice(num, size=max_scoring_points, replace=False)
+    )
+    score_src, score_dst = src[score_idx], dst[score_idx]
+    score_keep = max(3, int(round(score_src.shape[0] * (1.0 - trim_ratio))))
+
+    def trimmed_cost(candidate) -> float:
+        """Sum of the smallest ``score_keep`` squared residuals (inf if degenerate)."""
+        scale, rot, trans = candidate
+        if not np.isfinite(scale) or not np.isfinite(rot).all():
+            return float("inf")
+        residual = ((apply_sim3(score_src, scale, rot, trans) - score_dst) ** 2).sum(
+            axis=-1
+        )
+        return float(np.partition(residual, score_keep - 1)[:score_keep].sum())
+
+    best, best_cost = plain, trimmed_cost(plain)
+    for _ in range(num_candidates):
+        sample = rng.choice(num, size=3, replace=False)
+        try:
+            candidate = umeyama_sim3(src[sample], dst[sample])
+        except (ValueError, np.linalg.LinAlgError):
+            continue
+        cost = trimmed_cost(candidate)
+        if cost < best_cost:
+            best, best_cost = candidate, cost
+
+    scale, rot, trans = best
+    for _ in range(num_iterations):
+        residual = np.linalg.norm(apply_sim3(src, scale, rot, trans) - dst, axis=-1)
+        keep = np.argpartition(residual, keep_count - 1)[:keep_count]
+        scale, rot, trans = umeyama_sim3(src[keep], dst[keep])
     return scale, rot, trans
 
 

@@ -21,6 +21,7 @@ from pointmap_bench.geometry import (
     rotation_angle_deg,
     transform_points,
     translation_angle_deg,
+    robust_umeyama_sim3,
     umeyama_sim3,
 )
 
@@ -169,3 +170,34 @@ def test_relative_poses_are_frame_invariant():
 def test_transform_points_rejects_wrong_shape():
     with pytest.raises(ValueError):
         transform_points(np.eye(3), np.zeros((5, 3)))
+
+
+def test_robust_umeyama_ignores_gross_outliers():
+    """The trimmed fit recovers the transform the inliers agree on."""
+    rng = np.random.default_rng(7)
+    src = rng.normal(size=(500, 3))
+    rot = quat_xyzw_to_rotmat(np.array([0.1, 0.2, 0.3, 0.9]))
+    dst = 2.5 * (src @ rot.T) + np.array([1.0, -2.0, 0.5])
+
+    corrupted = dst.copy()
+    corrupted[:50] += rng.normal(scale=50.0, size=(50, 3))
+
+    scale, rot_fit, trans = robust_umeyama_sim3(src, corrupted, trim_ratio=0.2)
+    assert scale == pytest.approx(2.5, rel=1e-6)
+    np.testing.assert_allclose(rot_fit, rot, atol=1e-6)
+    np.testing.assert_allclose(trans, np.array([1.0, -2.0, 0.5]), atol=1e-6)
+
+    # The plain fit is measurably worse on the same data.
+    plain_scale, _, _ = umeyama_sim3(src, corrupted)
+    assert abs(plain_scale - 2.5) > abs(scale - 2.5)
+
+
+def test_robust_umeyama_matches_plain_fit_without_trimming():
+    rng = np.random.default_rng(3)
+    src = rng.normal(size=(100, 3))
+    dst = 1.7 * src + np.array([0.2, 0.3, 0.4])
+    trimmed = robust_umeyama_sim3(src, dst, trim_ratio=0.0)
+    plain = umeyama_sim3(src, dst)
+    assert trimmed[0] == pytest.approx(plain[0])
+    np.testing.assert_allclose(trimmed[1], plain[1], atol=1e-12)
+    np.testing.assert_allclose(trimmed[2], plain[2], atol=1e-12)

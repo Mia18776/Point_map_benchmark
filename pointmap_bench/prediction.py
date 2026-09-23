@@ -101,6 +101,19 @@ def _to_numpy(tensor: torch.Tensor) -> np.ndarray:
     return tensor.detach().to(torch.float32).cpu().numpy().astype(np.float64)
 
 
+def _squeeze_trailing_singleton(array: np.ndarray) -> np.ndarray:
+    """Drop a trailing length-1 axis, so per-pixel maps are always (H, W).
+
+    The upstream wrappers disagree here: VGGT and Depth Anything 3 emit a
+    confidence of shape (H, W) while Pi3 and Pi3-X emit (H, W, 1). Normalising
+    it once keeps :class:`Prediction`'s shape contract simple and stops Pi3 from
+    failing validation at the very end of an otherwise successful run.
+    """
+    if array.ndim >= 1 and array.shape[-1] == 1:
+        return array[..., 0]
+    return array
+
+
 def prediction_from_wrapper_output(
     outputs: List[Dict[str, torch.Tensor]],
     images: np.ndarray,
@@ -142,7 +155,9 @@ def prediction_from_wrapper_output(
         quats.append(_to_numpy(view["cam_quats"][batch_index]))
         trans.append(_to_numpy(view["cam_trans"][batch_index]))
         confidences.append(
-            _to_numpy(view["conf"][batch_index]) if "conf" in view else None
+            _squeeze_trailing_singleton(_to_numpy(view["conf"][batch_index]))
+            if "conf" in view
+            else None
         )
 
     points_world = np.stack(points_world)

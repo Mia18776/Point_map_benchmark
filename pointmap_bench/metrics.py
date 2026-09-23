@@ -37,6 +37,7 @@ from .geometry import (
     optimal_scale,
     project_points,
     relative_poses,
+    robust_umeyama_sim3,
     rotation_angle_deg,
     transform_points,
     translation_angle_deg,
@@ -160,6 +161,7 @@ def evaluate_pointmaps_in_first_camera_frame(
     gt_points: np.ndarray,
     gt_poses_c2w: np.ndarray,
     valid: np.ndarray,
+    is_metric: bool = True,
 ) -> Dict[str, float]:
     """Scale-normalised point-map error in the frame of the first camera.
 
@@ -169,9 +171,13 @@ def evaluate_pointmaps_in_first_camera_frame(
         gt_points: (V, H, W, 3) GT world-frame points.
         gt_poses_c2w: (V, 4, 4) GT camera-to-world poses.
         valid: (V, H, W) boolean mask of pixels valid in *both* prediction and GT.
+        is_metric: Whether the model claims real-world scale. ``metric/*`` is
+            omitted when it does not, because a scale-ambiguous model has no
+            real-world scale to be wrong about and the number would only make
+            the report look like it failed a test it never took.
 
     Returns:
-        Dict with ``cam0/*`` and ``metric/*`` entries.
+        Dict with ``cam0/*`` entries, plus ``metric/*`` for metric models.
     """
     pred_cam0 = transform_points(invert_se3(pred_poses_c2w[0]), pred_points)
     gt_cam0 = transform_points(invert_se3(gt_poses_c2w[0]), gt_points)
@@ -201,9 +207,10 @@ def evaluate_pointmaps_in_first_camera_frame(
         out[f"cam0/inlier_l2_{thresh}"] = _safe((err < thresh).mean())
 
     # Metric-scale agreement: only meaningful for models predicting real scale.
-    ratio = scale_pred / scale_gt
-    out["metric/scale_ratio"] = _safe(ratio)
-    out["metric/scale_abs_rel"] = _safe(abs(ratio - 1.0))
+    if is_metric:
+        ratio = scale_pred / scale_gt
+        out["metric/scale_ratio"] = _safe(ratio)
+        out["metric/scale_abs_rel"] = _safe(abs(ratio - 1.0))
     return out
 
 
@@ -211,9 +218,11 @@ def evaluate_pointmaps_sim3(
     pred_points: np.ndarray,
     gt_points: np.ndarray,
     valid: np.ndarray,
+    gt_valid: Optional[np.ndarray] = None,
     max_points: int = 200000,
     chamfer_max_points: int = 50000,
     seed: int = 0,
+    trim_ratio: float = 0.2,
 ) -> Dict[str, float]:
     """Point-map error after a global Umeyama similarity alignment.
 
@@ -221,20 +230,50 @@ def evaluate_pointmaps_sim3(
     correspondences, then applied to the full predicted cloud. Errors are
     reported in GT units, plus a scale-normalised variant so that scenes of
     different physical size can be averaged.
+
+    Two things matter for a fair cross-model comparison here:
+
+    * The fit is a *trimmed* least squares (see
+      :func:`~pointmap_bench.geometry.robust_umeyama_sim3`), so a handful of
+      diverging points cannot drag the alignment and corrupt every error built
+      on top of it. ``sim3/mae_lsq_rel_extent`` reports the plain least-squares
+      fit alongside it, as a reference and as a diagnostic for outlier mass
+      (compare the medians, not the means - see below).
+    * *Completeness* is measured against the **full** GT cloud (``gt_valid``),
+      not just the pixels the model chose to predict. Restricting it to the
+      intersection would mean a model that masks most of the image can never be
+      penalised for the geometry it left out. Accuracy stays on the
+      intersection, which is what accuracy means.
+
+    Args:
+        pred_points: (V, H, W, 3) predicted world-frame points.
+        gt_points: (V, H, W, 3) GT world-frame points.
+        valid: (V, H, W) pixels valid in *both* prediction and GT.
+        gt_valid: (V, H, W) pixels valid in the GT, regardless of whether the
+            model predicted them. Defaults to ``valid``, which reproduces the
+            old (optimistic) completeness.
+        max_points: Cap on the correspondences used to fit the alignment.
+        chamfer_max_points: Cap on the points used for the Chamfer distances.
+        seed: Seed of the deterministic subsampling.
+        trim_ratio: Fraction of worst correspondences dropped when fitting.
     """
-    pred_valid = pred_points[valid]
-    gt_valid = gt_points[valid]
-    if pred_valid.shape[0] < 3:
-        return {"sim3/num_points": float(pred_valid.shape[0])}
+    pred_matched = pred_points[valid]
+    gt_matched = gt_points[valid]
+    if pred_matched.shape[0] < 3:
+        return {"sim3/num_points": float(pred_matched.shape[0])}
 
-    idx = _subsample(pred_valid.shape[0], max_points, seed)
-    scale, rot, trans = umeyama_sim3(pred_valid[idx], gt_valid[idx])
+    idx = _subsample(pred_matched.shape[0], max_points, seed)
+    scale, rot, trans = robust_umeyama_sim3(
+        pred_matched[idx], gt_matched[idx], trim_ratio=trim_ratio
+    )
 
-    pred_aligned = apply_sim3(pred_valid, scale, rot, trans)
-    err = np.linalg.norm(pred_aligned - gt_valid, axis=-1)
+    pred_aligned = apply_sim3(pred_matched, scale, rot, trans)
+    err = np.linalg.norm(pred_aligned - gt_matched, axis=-1)
 
     # Scene extent used to make the errors comparable across scenes.
-    gt_extent = _safe(np.linalg.norm(gt_valid - gt_valid.mean(axis=0), axis=-1).mean())
+    gt_extent = _safe(
+        np.linalg.norm(gt_matched - gt_matched.mean(axis=0), axis=-1).mean()
+    )
 
     out: Dict[str, float] = {
         "sim3/scale": _safe(scale),
@@ -247,7 +286,36 @@ def evaluate_pointmaps_sim3(
         for thresh in L2_THRESHOLDS:
             out[f"sim3/inlier_l2_{thresh}"] = _safe((err < thresh * gt_extent).mean())
 
-    chamfer = chamfer_metrics(pred_aligned, gt_valid, chamfer_max_points, seed)
+    # Non-robust reference fit, for diagnosis. Compare the *medians*: a
+    # sim3/median_ae_lsq well above sim3/median_ae means the prediction carries
+    # enough outlier mass to drag a least-squares alignment off the geometry
+    # that the bulk of the points agree on. The means are not the comparison to
+    # make - a least-squares fit minimises squared error, so it can post the
+    # lower mean precisely by spreading the outliers over every other point.
+    lsq_scale, lsq_rot, lsq_trans = umeyama_sim3(pred_matched[idx], gt_matched[idx])
+    lsq_err = np.linalg.norm(
+        apply_sim3(pred_matched, lsq_scale, lsq_rot, lsq_trans) - gt_matched, axis=-1
+    )
+    out["sim3/mae_lsq"] = _safe(lsq_err.mean())
+    out["sim3/median_ae_lsq"] = _safe(np.median(lsq_err))
+    if gt_extent > 0:
+        out["sim3/mae_lsq_rel_extent"] = _safe(lsq_err.mean() / gt_extent)
+        out["sim3/median_ae_lsq_rel_extent"] = _safe(np.median(lsq_err) / gt_extent)
+
+    # Accuracy is prediction -> GT over the matched pixels; completeness is
+    # GT -> prediction over *every* GT point, so unpredicted geometry counts.
+    gt_reference = gt_points[gt_valid] if gt_valid is not None else gt_matched
+    accuracy = chamfer_metrics(pred_aligned, gt_matched, chamfer_max_points, seed)
+    completeness = chamfer_metrics(pred_aligned, gt_reference, chamfer_max_points, seed)
+    chamfer = {
+        "accuracy_mean": accuracy["accuracy_mean"],
+        "accuracy_median": accuracy["accuracy_median"],
+        "completeness_mean": completeness["completeness_mean"],
+        "completeness_median": completeness["completeness_median"],
+        "chamfer_mean": _safe(
+            0.5 * (accuracy["accuracy_mean"] + completeness["completeness_mean"])
+        ),
+    }
     for key, value in chamfer.items():
         out[f"sim3/{key}"] = value
         if gt_extent > 0:
@@ -431,10 +499,59 @@ def pointcloud_stats(points_world: np.ndarray, valid: np.ndarray) -> Dict[str, f
     return out
 
 
+def pose_pointmap_agreement(prediction) -> Dict[str, float]:
+    """Cross-check that a model's own outputs agree with each other.
+
+    ``poses_c2w @ points_cam`` must reproduce ``points_world``, and
+    back-projecting ``depth_z`` through ``intrinsics`` must reproduce
+    ``points_cam``. Both are identities that hold for any correct wrapper,
+    whatever the model predicts.
+
+    This is a harness check, not a model score. If a wrapper ever returns
+    world-to-camera poses where camera-to-world is expected, or a different
+    camera axis convention, every metric in this file would silently report
+    "that model is bad" instead of "the comparison is wrong". A large value
+    here means the numbers for that model must not be trusted.
+
+    Returns:
+        Relative residuals, normalised by the cloud's own scale, so the check
+        is comparable across metric and non-metric models.
+    """
+    valid = prediction.mask & _finite_mask(prediction.points_world)
+    out: Dict[str, float] = {}
+    if not valid.any():
+        return out
+
+    scale = _avg_distance_scale(prediction.points_cam, valid)
+    if not np.isfinite(scale) or scale <= 0:
+        return out
+
+    reprojected = np.stack(
+        [
+            transform_points(prediction.poses_c2w[view], prediction.points_cam[view])
+            for view in range(prediction.num_views)
+        ]
+    )
+    pose_residual = np.linalg.norm(
+        reprojected[valid] - prediction.points_world[valid], axis=-1
+    )
+    out["sanity/pose_pointmap_rel_err"] = _safe(np.median(pose_residual) / scale)
+
+    from .geometry import depth_to_camera_points
+
+    unprojected = depth_to_camera_points(prediction.depth_z, prediction.intrinsics)
+    depth_residual = np.linalg.norm(
+        unprojected[valid] - prediction.points_cam[valid], axis=-1
+    )
+    out["sanity/depth_pointmap_rel_err"] = _safe(np.median(depth_residual) / scale)
+    return out
+
+
 def evaluate_without_gt(prediction, max_pairs: int = 30) -> Dict[str, float]:
     """All GT-free metrics for a :class:`~pointmap_bench.prediction.Prediction`."""
     out: Dict[str, float] = {}
     out.update(pointcloud_stats(prediction.points_world, prediction.mask))
+    out.update(pose_pointmap_agreement(prediction))
     out.update(
         multiview_consistency(
             prediction.points_world,
@@ -483,7 +600,14 @@ def evaluate_with_gt(
     )
     valid = gt_valid & prediction.mask & _finite_mask(prediction.points_world)
 
-    out: Dict[str, float] = {"gt/valid_ratio": _safe(valid.mean())}
+    # valid_ratio is over all pixels; covered_ratio is the share of the GT the
+    # model actually predicted, which is the number that must be read next to
+    # every accuracy metric below - accuracy and coverage trade off directly.
+    gt_count = float(gt_valid.sum())
+    out: Dict[str, float] = {
+        "gt/valid_ratio": _safe(valid.mean()),
+        "gt/covered_ratio": _safe(valid.sum() / gt_count) if gt_count > 0 else float("nan"),
+    }
     if not valid.any():
         return out
 
@@ -494,9 +618,14 @@ def evaluate_with_gt(
             gt_points,
             gt_poses_c2w,
             valid,
+            is_metric=bool(getattr(prediction, "is_metric", True)),
         )
     )
-    out.update(evaluate_pointmaps_sim3(prediction.points_world, gt_points, valid))
+    out.update(
+        evaluate_pointmaps_sim3(
+            prediction.points_world, gt_points, valid, gt_valid=gt_valid
+        )
+    )
     out.update(evaluate_poses(prediction.poses_c2w, gt_poses_c2w))
     out.update(evaluate_depth(prediction.depth_z, gt_depth_z, valid))
     return out

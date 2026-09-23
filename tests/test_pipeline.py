@@ -233,3 +233,55 @@ def test_report_writing_and_aggregation(tmp_path):
     markdown = open(paths["markdown"], encoding="utf-8").read()
     assert "Skipped / failed runs" in markdown
     assert "not installed" in markdown
+
+
+def test_pi3_style_confidence_shape_is_accepted():
+    """Pi3 and Pi3-X emit a (H, W, 1) confidence where VGGT emits (H, W).
+
+    The benchmark has to normalise that, otherwise Pi3 raises a shape error
+    after a full, successful inference and produces no results at all.
+    """
+    import torch
+
+    from pointmap_bench.prediction import prediction_from_wrapper_output
+
+    num_views, height, width = 2, 112, 112
+    outputs = []
+    for _ in range(num_views):
+        points = torch.rand(1, height, width, 3) + 1.0
+        rays = torch.rand(1, height, width, 3) + torch.tensor([0.0, 0.0, 4.0])
+        outputs.append(
+            {
+                "pts3d": points,
+                "pts3d_cam": points,
+                "ray_directions": torch.nn.functional.normalize(rays, dim=-1),
+                "cam_quats": torch.tensor([[0.0, 0.0, 0.0, 1.0]]),
+                "cam_trans": torch.zeros(1, 3),
+                "conf": torch.rand(1, height, width, 1),
+            }
+        )
+
+    prediction = prediction_from_wrapper_output(
+        outputs,
+        images=np.zeros((num_views, height, width, 3), dtype=np.float32),
+        is_metric=False,
+    )
+    assert prediction.confidence.shape == (num_views, height, width)
+
+
+def test_report_warns_when_models_ran_different_scenes(tmp_path):
+    records = [
+        {"model": "a", "scene": "s0", "status": "ok", "cloud/valid_ratio": 1.0},
+        {"model": "a", "scene": "s1", "status": "ok", "cloud/valid_ratio": 1.0},
+        {"model": "b", "scene": "s0", "status": "ok", "cloud/valid_ratio": 1.0},
+        {"model": "b", "scene": "s1", "status": "error", "reason": "boom"},
+    ]
+    paths = write_reports(records, str(tmp_path))
+    report = open(paths["markdown"], encoding="utf-8").read()
+    assert "Not comparable as-is" in report
+    assert "num_scenes" in report
+
+    matched = [r for r in records if not (r["model"] == "b" and r["scene"] == "s1")]
+    matched = matched + [dict(matched[2], scene="s1")]
+    report = open(write_reports(matched, str(tmp_path))["markdown"], encoding="utf-8").read()
+    assert "Not comparable as-is" not in report

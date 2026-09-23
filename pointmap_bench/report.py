@@ -11,16 +11,20 @@ from typing import Dict, Iterable, List, Optional, Sequence
 # Metric name -> (pretty label, "lower"/"higher" is better). Metrics not listed
 # still show up in the CSV/JSON, just without a direction arrow.
 METRIC_DIRECTIONS: Dict[str, str] = {
+    "num_scenes": "neutral",
     "inference_seconds": "lower",
     "seconds_per_view": "lower",
     "peak_memory_mb": "lower",
     "cloud/valid_ratio": "higher",
+    "gt/covered_ratio": "higher",
     "consistency/rel_depth_err_median": "lower",
     "consistency/rel_depth_err_mean": "lower",
     "consistency/inlier_1.03": "higher",
     "consistency/inlier_1.05": "higher",
     "consistency/inlier_1.25": "higher",
     "consistency/overlap_ratio": "neutral",
+    "sanity/pose_pointmap_rel_err": "lower",
+    "sanity/depth_pointmap_rel_err": "lower",
     "cam0/mae": "lower",
     "cam0/median_ae": "lower",
     "cam0/rel_ae": "lower",
@@ -31,6 +35,8 @@ METRIC_DIRECTIONS: Dict[str, str] = {
     "cam0/inlier_l2_0.05": "higher",
     "cam0/inlier_l2_0.1": "higher",
     "sim3/mae_rel_extent": "lower",
+    "sim3/mae_lsq_rel_extent": "lower",
+    "sim3/median_ae_lsq_rel_extent": "lower",
     "sim3/accuracy_median_rel_extent": "lower",
     "sim3/completeness_median_rel_extent": "lower",
     "sim3/chamfer_mean_rel_extent": "lower",
@@ -45,16 +51,31 @@ METRIC_DIRECTIONS: Dict[str, str] = {
     "pose/ate_rmse_rel": "lower",
 }
 
-RUNTIME_COLUMNS = ("inference_seconds", "seconds_per_view", "peak_memory_mb")
+# num_scenes leads every table: two models are only comparable when they
+# completed the same scenes, and a silent difference there is the easiest way
+# to read a benchmark backwards.
+RUNTIME_COLUMNS = (
+    "num_scenes",
+    "inference_seconds",
+    "seconds_per_view",
+    "peak_memory_mb",
+)
 GT_FREE_COLUMNS = (
+    "num_scenes",
     "cloud/valid_ratio",
     "consistency/overlap_ratio",
     "consistency/rel_depth_err_median",
     "consistency/inlier_1.03",
     "consistency/inlier_1.05",
     "consistency/inlier_1.25",
+    "sanity/pose_pointmap_rel_err",
 )
 GT_COLUMNS = (
+    "num_scenes",
+    # Coverage belongs next to accuracy: every accuracy number below is
+    # computed only on the pixels the model predicted, so a model can always
+    # trade coverage for accuracy.
+    "gt/covered_ratio",
     "cam0/rel_ae",
     "cam0/delta_1.03",
     "cam0/delta_1.25",
@@ -109,6 +130,30 @@ def aggregate_by_model(records: Sequence[dict]) -> Dict[str, Dict[str, float]]:
         )
         aggregated[model] = row
     return aggregated
+
+
+def _scene_coverage_warning(records: Sequence[dict]) -> Optional[str]:
+    """Warn when the models were not averaged over the same set of scenes.
+
+    Averages taken over different scenes are not comparable, and nothing else
+    in the report would reveal it.
+    """
+    completed: Dict[str, set] = {}
+    for record in records:
+        completed.setdefault(record["model"], set())
+        if record.get("status") == "ok":
+            completed[record["model"]].add(record.get("scene"))
+    non_empty = {m: sc for m, sc in completed.items() if sc}
+    if len(non_empty) < 2 or len(set(map(frozenset, non_empty.values()))) == 1:
+        return None
+    detail = ", ".join(
+        f"{model} ({len(scenes)})" for model, scenes in sorted(non_empty.items())
+    )
+    return (
+        "Not comparable as-is: the models completed different scenes, so the "
+        f"averages below are taken over different data - {detail}. Re-run the "
+        "failures, or filter results.csv to the scenes every model completed."
+    )
 
 
 def _format(value: Optional[float]) -> str:
@@ -188,6 +233,9 @@ def write_reports(
     sections = [f"# {title}\n"]
     for note in extra_notes:
         sections.append(f"> {note}\n")
+    mismatch = _scene_coverage_warning(records)
+    if mismatch:
+        sections.append(f"> **{mismatch}**\n")
 
     sections.append("\n## Runtime and memory\n")
     sections.append(_markdown_table(aggregated, RUNTIME_COLUMNS))
