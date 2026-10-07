@@ -69,8 +69,29 @@ def parse_image_size(value: str):
         raise argparse.ArgumentTypeError(
             f"Expected WIDTHxHEIGHT (e.g. 448x336), got '{value}'"
         ) from exc
-    check_common_size((width, height))
+    try:
+        check_common_size((width, height))
+    except ValueError as exc:
+        # argparse replaces a bare ValueError from a type= callable with its
+        # own generic "invalid value" text, throwing away the explanation of
+        # which patch size the number is not divisible by.
+        raise argparse.ArgumentTypeError(str(exc)) from exc
     return width, height
+
+
+def positive_int(value: str) -> int:
+    """An int >= 1, rejected at parse time rather than deep inside a slice."""
+    try:
+        number = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"Expected an integer, got '{value}'") from exc
+    if number < 1:
+        raise argparse.ArgumentTypeError(
+            f"Must be 1 or greater, got {number}. A stride of 0 is a slice error, "
+            "a negative stride silently reverses the view order, and a cap of 0 "
+            "selects no images at all."
+        )
+    return number
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -105,8 +126,12 @@ def build_parser() -> argparse.ArgumentParser:
             "e.g. 448x336). Required for ground-truth evaluation."
         ),
     )
-    parser.add_argument("--stride", type=int, default=1, help="Use every Nth image")
-    parser.add_argument("--max-views", type=int, help="Cap the views per scene")
+    parser.add_argument(
+        "--stride", type=positive_int, default=1, help="Use every Nth image"
+    )
+    parser.add_argument(
+        "--max-views", type=positive_int, help="Cap the views per scene"
+    )
     parser.add_argument(
         "--mast3r-checkpoint-dir",
         help="Directory holding MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth",
@@ -317,16 +342,26 @@ def main() -> int:
                         )
                     )
 
+                # Exports are side artefacts. A failure here (full disk, a
+                # long path, trimesh raising) must not discard an inference
+                # that already produced a full set of metrics.
                 scene_dir = os.path.join(args.output_dir, scene.name)
-                if args.export_ply:
-                    written = export_point_cloud(
-                        prediction, os.path.join(scene_dir, f"{model_key}.ply")
-                    )
-                    record["exported_points"] = written
-                if args.export_glb:
-                    export_glb(prediction, os.path.join(scene_dir, f"{model_key}.glb"))
-                if args.export_npz:
-                    export_npz(prediction, os.path.join(scene_dir, f"{model_key}.npz"))
+                try:
+                    if args.export_ply:
+                        record["exported_points"] = export_point_cloud(
+                            prediction, os.path.join(scene_dir, f"{model_key}.ply")
+                        )
+                    if args.export_glb:
+                        export_glb(
+                            prediction, os.path.join(scene_dir, f"{model_key}.glb")
+                        )
+                    if args.export_npz:
+                        export_npz(
+                            prediction, os.path.join(scene_dir, f"{model_key}.npz")
+                        )
+                except Exception as exc:  # noqa: BLE001 - recorded, not fatal
+                    record["export_error"] = f"{type(exc).__name__}: {exc}"
+                    print(f"  [warn] {scene.name}: export failed: {exc}")
 
                 print(
                     f"  {scene.name}: {record.get('inference_seconds', float('nan')):.2f}s"

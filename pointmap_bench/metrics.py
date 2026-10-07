@@ -34,7 +34,6 @@ from .geometry import (
     apply_sim3,
     depth_to_world_points,
     invert_se3,
-    optimal_scale,
     project_points,
     relative_poses,
     robust_umeyama_sim3,
@@ -653,18 +652,3 @@ def evaluate_with_gt(
 
     out.update(evaluate_official(prediction, gt_intrinsics, gt_poses_c2w))
     return out
-
-
-def scale_only_alignment_error(
-    pred_points: np.ndarray, gt_points: np.ndarray, valid: np.ndarray
-) -> float:
-    """Mean L2 error after a least-squares scale-only alignment.
-
-    Helper kept separate from :func:`evaluate_with_gt` because it assumes the
-    two clouds already share a common rotation and origin.
-    """
-    scale = optimal_scale(pred_points[valid], gt_points[valid])
-    if not np.isfinite(scale):
-        return float("nan")
-    err = np.linalg.norm(scale * pred_points[valid] - gt_points[valid], axis=-1)
-    return _safe(err.mean())

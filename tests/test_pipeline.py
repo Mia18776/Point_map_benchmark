@@ -589,3 +589,27 @@ def test_mapanything_without_a_mask_key_keeps_every_pixel():
         images, spec, {},
     )
     assert masked.mask.mean() == pytest.approx(0.5, abs=1e-6)
+
+
+def test_cli_rejects_nonsense_sampling_arguments():
+    """A bad --stride must fail at parse time, with a readable reason.
+
+    --stride 0 used to raise "slice step cannot be zero" from deep inside
+    list_images, outside any try; --max-views 0 selected nothing and then
+    reported "No images found" for a directory full of images; --stride -1
+    silently reversed the view order.
+    """
+    import argparse
+
+    from run_benchmark import parse_image_size, positive_int
+
+    for bad in ("0", "-1"):
+        with pytest.raises(argparse.ArgumentTypeError, match="1 or greater"):
+            positive_int(bad)
+    assert positive_int("3") == 3
+
+    # The explanation of *why* a size is rejected must survive argparse, which
+    # replaces a bare ValueError with its own generic message.
+    with pytest.raises(argparse.ArgumentTypeError, match="divisible by patch size"):
+        parse_image_size("672x504")
+    assert parse_image_size("448x336") == (448, 336)

@@ -205,7 +205,7 @@ and how it performs best. But then the models do not share a pixel grid.
 
 `--image-size` forces a shared grid. It must be divisible by both patch sizes
 in play (14 and 16), i.e. a multiple of **112** — for example `448x336`,
-`560x448` or `672x504`. For ground-truth comparisons, use it: it makes the GT
+`560x448` or `672x448`. For ground-truth comparisons, use it: it makes the GT
 depth resampling identical for every model.
 
 ### Useful flags
