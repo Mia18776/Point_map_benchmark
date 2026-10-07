@@ -19,7 +19,9 @@ forced onto the same pixel grid::
 from __future__ import annotations
 
 import argparse
+import datetime
 import os
+import subprocess
 import sys
 import traceback
 
@@ -40,6 +42,7 @@ from pointmap_bench.data import (  # noqa: E402
     discover_scenes,
     list_images,
     load_ground_truth,
+    sorted_stride_sampling,
 )
 from pointmap_bench.export import (  # noqa: E402
     export_glb,
@@ -139,6 +142,54 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def code_revision() -> str:
+    """Short git revision of this checkout, or "unknown" outside a repo."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    try:
+        out = subprocess.run(
+            ["git", "-C", root, "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):  # pragma: no cover - environment
+        return "unknown"
+    if out.returncode != 0:
+        return "unknown"
+    revision = out.stdout.strip()
+    dirty = subprocess.run(
+        ["git", "-C", root, "status", "--porcelain"],
+        capture_output=True,
+        text=True,
+    )
+    if dirty.returncode == 0 and dirty.stdout.strip():
+        revision += "-dirty"
+    return revision or "unknown"
+
+
+def run_configuration(args) -> dict:
+    """Every setting that changes the numbers, collected for the report.
+
+    A score without its configuration cannot be reproduced or compared, so
+    this travels with the results rather than living in someone's shell
+    history.
+    """
+    return {
+        "timestamp": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+        "code_revision": code_revision(),
+        "models": list(args.models),
+        "device": args.device,
+        "image_size": (
+            f"{args.image_size[0]}x{args.image_size[1]}" if args.image_size else "native"
+        ),
+        "stride": args.stride,
+        "max_views": args.max_views,
+        "confidence_percentile": args.confidence_percentile,
+        "max_pairs": args.max_pairs,
+        "mapanything_mask": not args.no_mapanything_mask,
+    }
+
+
 def print_model_availability(device: str) -> None:
     print(f"{'model':<20} {'available':<10} detail")
     print("-" * 88)
@@ -165,6 +216,7 @@ def main() -> int:
                 name=os.path.basename(os.path.abspath(args.images).rstrip(os.sep)),
                 image_paths=list_images(args.images, args.stride, args.max_views),
                 gt_path=args.gt,
+                sampling=sorted_stride_sampling(args.stride, args.max_views),
             )
         ]
     else:
@@ -196,6 +248,7 @@ def main() -> int:
                     "scene": scene.name,
                     "status": "skipped",
                     "reason": reason,
+                    **scene.provenance(),
                 }
                 for scene in scenes
             )
@@ -215,13 +268,19 @@ def main() -> int:
                     "scene": scene.name,
                     "status": "load_error",
                     "reason": message,
+                    **scene.provenance(),
                 }
                 for scene in scenes
             )
             continue
 
         for scene in scenes:
-            record = {"model": model_key, "scene": scene.name, "status": "ok"}
+            record = {
+                "model": model_key,
+                "scene": scene.name,
+                "status": "ok",
+                **scene.provenance(),
+            }
             try:
                 prediction = run_model(
                     spec,
@@ -302,7 +361,9 @@ def main() -> int:
     if args.no_mapanything_mask:
         notes.append("MapAnything's edge/ambiguity masking was disabled.")
 
-    paths = write_reports(records, args.output_dir, extra_notes=notes)
+    paths = write_reports(
+        records, args.output_dir, extra_notes=notes, config=run_configuration(args)
+    )
     print("\nWrote:")
     for name, path in paths.items():
         print(f"  {name}: {path}")

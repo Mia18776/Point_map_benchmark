@@ -54,6 +54,25 @@ METRIC_DIRECTIONS: Dict[str, str] = {
 # num_scenes leads every table: two models are only comparable when they
 # completed the same scenes, and a silent difference there is the easiest way
 # to read a benchmark backwards.
+# Record fields that describe the run rather than score it; averaging a view
+# digest or a device name would be meaningless. num_views is deliberately not
+# here: it is a number worth averaging, and it belongs next to the scores
+# because a model evaluated on 8 views is not comparable to one on 24.
+NON_METRIC_FIELDS = frozenset(
+    {
+        "model",
+        "scene",
+        "status",
+        "reason",
+        "display_name",
+        "views",
+        "views_digest",
+        "resolution",
+        "norm_type",
+        "device",
+    }
+)
+
 RUNTIME_COLUMNS = (
     "num_scenes",
     "inference_seconds",
@@ -114,7 +133,7 @@ def aggregate_by_model(records: Sequence[dict]) -> Dict[str, Dict[str, float]]:
             continue
         bucket = per_model.setdefault(record["model"], {})
         for key, value in record.items():
-            if key in ("model", "scene", "status", "reason"):
+            if key in NON_METRIC_FIELDS or key.startswith("sampling/"):
                 continue
             bucket.setdefault(key, []).append(value)
 
@@ -195,13 +214,76 @@ def _markdown_table(
     return "\n".join(lines) + "\n"
 
 
+def _configuration_table(config: Optional[dict]) -> List[str]:
+    """Render the settings that change the numbers, so a run can be repeated."""
+    if not config:
+        return []
+    lines = ["", "## Run configuration", "", "| setting | value |", "| --- | --- |"]
+    for key in sorted(config):
+        value = config[key]
+        if isinstance(value, (list, tuple)):
+            value = " ".join(str(v) for v in value)
+        if value is None or value == "":
+            value = "-"
+        lines.append(f"| {key} | {value} |")
+    lines.append("")
+    return lines
+
+
+def _views_table(records: Sequence[dict]) -> List[str]:
+    """One row per scene: how many views, which ones, and how they were picked."""
+    seen: Dict[str, dict] = {}
+    for record in records:
+        scene = record.get("scene")
+        if scene is None or scene in seen or "views_digest" not in record:
+            continue
+        seen[scene] = record
+    if not seen:
+        return []
+
+    lines = [
+        "",
+        "## Views used",
+        "",
+        "Which views a model is given changes its scores, so two runs are only "
+        "comparable when they share these digests.",
+        "",
+        "| scene | num_views | views_digest | sampling |",
+        "| --- | --- | --- | --- |",
+    ]
+    for scene in sorted(seen):
+        record = seen[scene]
+        sampling = ", ".join(
+            f"{key.split('/', 1)[1]}={record[key]}"
+            for key in sorted(record)
+            if key.startswith("sampling/")
+        )
+        lines.append(
+            f"| {scene} | {_format(record.get('num_views'))} | "
+            f"`{record.get('views_digest')}` | {sampling or '-'} |"
+        )
+    lines.append("")
+    return lines
+
+
 def write_reports(
     records: Sequence[dict],
     output_dir: str,
     title: str = "3D point-map benchmark",
     extra_notes: Sequence[str] = (),
+    config: Optional[dict] = None,
 ) -> Dict[str, str]:
     """Write ``results.json``, ``results.csv`` and ``report.md``.
+
+    Args:
+        records: One record per (model, scene).
+        output_dir: Directory to write into.
+        title: Report heading.
+        extra_notes: Lines quoted under the heading.
+        config: The settings that affect the numbers (models, device, image
+            size, sampling, thresholds, code revision). Written to the JSON and
+            rendered as a table, so a result can be reproduced rather than
+            guessed at.
 
     Returns:
         Mapping from artefact name to the path written.
@@ -214,7 +296,13 @@ def write_reports(
     }
 
     with open(paths["json"], "w", encoding="utf-8") as handle:
-        json.dump(list(records), handle, indent=2, sort_keys=True, default=str)
+        json.dump(
+            {"config": dict(config or {}), "records": list(records)},
+            handle,
+            indent=2,
+            sort_keys=True,
+            default=str,
+        )
 
     fieldnames: List[str] = []
     for record in records:
@@ -236,6 +324,9 @@ def write_reports(
     mismatch = _scene_coverage_warning(records)
     if mismatch:
         sections.append(f"> **{mismatch}**\n")
+
+    sections.extend(_configuration_table(config))
+    sections.extend(_views_table(records))
 
     sections.append("\n## Runtime and memory\n")
     sections.append(_markdown_table(aggregated, RUNTIME_COLUMNS))

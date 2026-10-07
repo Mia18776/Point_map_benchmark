@@ -9,6 +9,7 @@ They need the ``mapanything`` package (for its image loading and cropping
 utilities) and are skipped otherwise.
 """
 
+import json
 import os
 import sys
 
@@ -24,11 +25,13 @@ from PIL import Image  # noqa: E402
 from make_synthetic_scene import look_at_pose, render_view  # noqa: E402
 
 from pointmap_bench.data import (  # noqa: E402
+    Scene,
     check_common_size,
     discover_scenes,
     list_images,
     load_ground_truth,
     load_views,
+    sorted_stride_sampling,
     views_to_rgb,
 )
 from pointmap_bench.export import write_ply  # noqa: E402
@@ -285,3 +288,55 @@ def test_report_warns_when_models_ran_different_scenes(tmp_path):
     matched = matched + [dict(matched[2], scene="s1")]
     report = open(write_reports(matched, str(tmp_path))["markdown"], encoding="utf-8").read()
     assert "Not comparable as-is" not in report
+
+
+def test_scene_records_which_views_it_used(synthetic_scene):
+    """A result that cannot say which views it saw cannot be reproduced."""
+    paths = list_images(synthetic_scene["image_dir"])
+    scene = Scene(name="s", image_paths=paths, sampling=sorted_stride_sampling(1, None))
+
+    assert scene.view_names == [os.path.basename(p) for p in paths]
+    provenance = scene.provenance()
+    assert provenance["num_views"] == len(paths)
+    assert provenance["sampling/strategy"] == "sorted_filename_stride"
+    assert provenance["sampling/stride"] == 1
+
+    # Same views, same digest; a different selection or order is a different run.
+    assert Scene(name="other", image_paths=list(paths)).views_digest == scene.views_digest
+    assert Scene(name="s", image_paths=paths[:-1]).views_digest != scene.views_digest
+    assert Scene(name="s", image_paths=paths[::-1]).views_digest != scene.views_digest
+
+
+def test_report_carries_the_run_configuration(tmp_path):
+    records = [
+        {
+            "model": "a",
+            "scene": "s1",
+            "status": "ok",
+            "inference_seconds": 1.0,
+            "num_views": 3,
+            "views": "000.png 001.png 002.png",
+            "views_digest": "abc123def456",
+            "sampling/strategy": "sorted_filename_stride",
+            "sampling/stride": 2,
+        }
+    ]
+    config = {"image_size": "448x336", "stride": 2, "code_revision": "deadbee"}
+    paths = write_reports(records, str(tmp_path), config=config)
+
+    markdown = open(paths["markdown"], encoding="utf-8").read()
+    assert "Run configuration" in markdown
+    assert "deadbee" in markdown and "448x336" in markdown
+    assert "Views used" in markdown and "abc123def456" in markdown
+    assert "stride=2" in markdown
+
+    with open(paths["json"], encoding="utf-8") as handle:
+        payload = json.load(handle)
+    assert payload["config"]["code_revision"] == "deadbee"
+    assert payload["records"][0]["views_digest"] == "abc123def456"
+
+    # Provenance must never be averaged into the score table.
+    aggregated = aggregate_by_model(records)
+    assert "views_digest" not in aggregated["a"]
+    assert "sampling/stride" not in aggregated["a"]
+    assert aggregated["a"]["num_views"] == 3

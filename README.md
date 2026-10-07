@@ -157,8 +157,27 @@ python scripts/run_benchmark.py \
 Outputs land in `--output-dir`:
 
 * `report.md` — Markdown tables, aggregated per model, arrows marking metric direction
-* `results.csv`, `results.json` — per (model, scene) records for your own analysis
+* `results.csv` — one row per (model, scene), including the view provenance below
+* `results.json` — `{"config": {...}, "records": [...]}`: the run configuration
+  plus the same per-record data
 * `<scene>/<model>.ply` / `.glb` / `.npz` — point clouds and raw predictions (with the export flags)
+
+### Reproducibility
+
+Which views a model is given changes its scores, so every run records what it
+actually saw. `report.md` opens with two tables — **Run configuration** (code
+revision, device, image size, stride, thresholds, timestamp) and **Views used**
+(per scene: view count, a `views_digest`, and the sampling strategy) — and the
+same fields are on every CSV/JSON record.
+
+Two runs are comparable when their digests match. They are not when the digests
+differ, however similar the settings look.
+
+The default selection is `sorted_filename_stride`: sort by filename, take every
+`--stride`-th image, cap at `--max-views`. It is recorded explicitly rather than
+left implicit, because "whatever order the filenames happened to be in" is a
+choice that moves the numbers. It is *not* the protocol map-anything's own
+benchmark uses, which samples views by covisibility — see [Caveats](#caveats).
 
 ### Why `--image-size` matters
 

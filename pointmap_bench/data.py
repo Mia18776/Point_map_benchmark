@@ -9,9 +9,10 @@ compared pixel by pixel without any resampling.
 
 from __future__ import annotations
 
+import hashlib
 import os
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence, Tuple
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import PIL.Image
@@ -26,15 +27,49 @@ COMMON_SIZE_MULTIPLE = 112  # lcm(14, 16)
 
 @dataclass
 class Scene:
-    """A set of images (and optionally ground truth) to reconstruct."""
+    """A set of images (and optionally ground truth) to reconstruct.
+
+    ``sampling`` records *how* these particular views were chosen. Which views
+    a model is given changes its scores, so a result that does not carry its
+    view selection with it cannot be reproduced or compared against anyone
+    else's run.
+    """
 
     name: str
     image_paths: List[str]
     gt_path: Optional[str] = None
+    sampling: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def num_views(self) -> int:
         return len(self.image_paths)
+
+    @property
+    def view_names(self) -> List[str]:
+        """Basenames of the views, in the order they are fed to the model."""
+        return [os.path.basename(path) for path in self.image_paths]
+
+    @property
+    def views_digest(self) -> str:
+        """Short stable hash of the ordered view list.
+
+        Two runs that share a digest saw exactly the same images in exactly the
+        same order; two that do not are not comparable, however similar their
+        settings look.
+        """
+        joined = "|".join(self.view_names).encode("utf-8")
+        return hashlib.sha1(joined).hexdigest()[:12]
+
+    def provenance(self) -> Dict[str, Any]:
+        """The fields a result record needs in order to be reproducible."""
+        out: Dict[str, Any] = {
+            "num_views": self.num_views,
+            "views_digest": self.views_digest,
+            "views": " ".join(self.view_names),
+        }
+        for key, value in self.sampling.items():
+            out[f"sampling/{key}"] = value
+        return out
 
 
 def list_images(folder_or_list, stride: int = 1, limit: Optional[int] = None):
@@ -63,6 +98,20 @@ def list_images(folder_or_list, stride: int = 1, limit: Optional[int] = None):
     return paths
 
 
+def sorted_stride_sampling(stride: int = 1, limit: Optional[int] = None):
+    """Describe the default view-selection strategy.
+
+    It is deliberately spelled out rather than left implicit: "whatever order
+    the filenames happened to be in" is a choice that changes the scores, and
+    it has to travel with the results.
+    """
+    return {
+        "strategy": "sorted_filename_stride",
+        "stride": int(stride),
+        "max_views": limit,
+    }
+
+
 def discover_scenes(root: str, stride: int = 1, limit: Optional[int] = None):
     """Build scenes from a dataset root.
 
@@ -74,6 +123,7 @@ def discover_scenes(root: str, stride: int = 1, limit: Optional[int] = None):
       automatically as ground truth.
     """
     root = os.path.abspath(root)
+    sampling = sorted_stride_sampling(stride, limit)
     direct = [n for n in os.listdir(root) if n.endswith(IMAGE_EXTENSIONS)]
     if direct:
         gt_path = os.path.join(root, "gt.npz")
@@ -82,6 +132,7 @@ def discover_scenes(root: str, stride: int = 1, limit: Optional[int] = None):
                 name=os.path.basename(root.rstrip(os.sep)),
                 image_paths=list_images(root, stride, limit),
                 gt_path=gt_path if os.path.isfile(gt_path) else None,
+                sampling=dict(sampling),
             )
         ]
 
@@ -102,6 +153,7 @@ def discover_scenes(root: str, stride: int = 1, limit: Optional[int] = None):
                 name=name,
                 image_paths=list_images(image_dir, stride, limit),
                 gt_path=gt_path if os.path.isfile(gt_path) else None,
+                sampling=dict(sampling),
             )
         )
     if not scenes:
