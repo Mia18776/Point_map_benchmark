@@ -512,6 +512,16 @@ def test_wai_source_converts_a_dataset_sample_to_the_common_format():
     assert prepared.views[0]["img"].shape == (1, 3, size, size)
     assert prepared.views[0]["data_norm_type"] == ["dinov2"]
     assert prepared.views[0]["true_shape"].shape == (1, 2)
+
+    # The view must carry images only. MapAnything.infer rejects unknown keys,
+    # and - worse - accepts intrinsics/depth/poses as priors, so forwarding the
+    # dataset's ground truth would hand the model the answer.
+    from mapanything.utils.inference import ALLOWED_VIEW_KEYS
+
+    for view in prepared.views:
+        assert set(view) <= set(ALLOWED_VIEW_KEYS), set(view) - set(ALLOWED_VIEW_KEYS)
+        for leaked in ("depthmap", "camera_pose", "camera_intrinsics", "pts3d"):
+            assert leaked not in view
     assert prepared.images.shape == (3, size, size, 3)
     assert prepared.ground_truth["depth_z"].shape == (3, size, size)
     assert prepared.ground_truth["poses_c2w"].shape == (3, 4, 4)

@@ -138,15 +138,35 @@ class FolderViewSource(ViewSource):
         )
 
 
+# Only these keys may reach a model. The list is deliberately short, for two
+# independent reasons:
+#
+# 1. MapAnything.infer validates its input against an allow-list
+#    (ALLOWED_VIEW_KEYS in mapanything/utils/inference.py) and raises on
+#    anything else. A WAI view carries depthmap, camera_intrinsics,
+#    camera_pose, label, pts3d, valid_mask and more, so passing it through
+#    would break the one model the benchmark is named after, while the hydra
+#    wrappers - which do not validate - carried on.
+# 2. More importantly, a WAI view *contains the ground truth*, and
+#    MapAnything.infer accepts intrinsics, depth and poses as optional
+#    geometric priors. Forwarding those would hand the model the answer and
+#    quietly turn the benchmark into a measurement of nothing.
+#
+# This benchmark evaluates images-only reconstruction, so images are all a
+# model gets.
+_MODEL_INPUT_KEYS = ("img", "data_norm_type", "true_shape", "instance", "idx")
+
+
 def _as_batched_view(view: dict) -> dict:
     """Turn one WAI dataset view into a model-wrapper input view.
 
     The dataset yields un-batched tensors for training; the wrappers expect a
-    leading batch dimension and ``data_norm_type`` as a list.
+    leading batch dimension and ``data_norm_type`` as a list. Everything
+    outside :data:`_MODEL_INPUT_KEYS` is dropped - see the note above.
     """
     import torch
 
-    out = dict(view)
+    out = {key: view[key] for key in _MODEL_INPUT_KEYS if key in view}
     img = view["img"]
     out["img"] = img if img.dim() == 4 else img[None]
     norm_type = view["data_norm_type"]
