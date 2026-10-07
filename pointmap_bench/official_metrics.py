@@ -28,7 +28,7 @@ disagree on purpose; both are reported.
 
 from __future__ import annotations
 
-from typing import Dict, Optional, Sequence
+from typing import Dict, Sequence
 
 import numpy as np
 
@@ -44,7 +44,6 @@ def available() -> bool:
     """Whether map-anything's metric helpers can be imported here."""
     try:  # pragma: no cover - trivial import probe
         import torch  # noqa: F401
-
         from mapanything.utils.geometry import get_rays_in_camera_frame  # noqa: F401
         from mapanything.utils.metrics import (  # noqa: F401
             calculate_auc_np,

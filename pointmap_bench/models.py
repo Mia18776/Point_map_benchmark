@@ -28,7 +28,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import torch
 
-from .prediction import Prediction, prediction_from_wrapper_output, _to_numpy
+from .prediction import Prediction, _to_numpy, prediction_from_wrapper_output
 from .sources import PreparedViews
 
 

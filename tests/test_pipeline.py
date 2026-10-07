@@ -20,9 +20,8 @@ sys.path.insert(
     0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts")
 )
 
-from PIL import Image  # noqa: E402
-
 from make_synthetic_scene import look_at_pose, render_view  # noqa: E402
+from PIL import Image  # noqa: E402
 
 from pointmap_bench.data import (  # noqa: E402
     Scene,

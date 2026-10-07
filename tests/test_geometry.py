@@ -18,10 +18,10 @@ from pointmap_bench.geometry import (
     project_points,
     quat_xyzw_to_rotmat,
     relative_poses,
+    robust_umeyama_sim3,
     rotation_angle_deg,
     transform_points,
     translation_angle_deg,
-    robust_umeyama_sim3,
     umeyama_sim3,
 )
 
