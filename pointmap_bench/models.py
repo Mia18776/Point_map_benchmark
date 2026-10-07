@@ -312,7 +312,16 @@ def _prediction_from_mapanything(outputs, images, spec: ModelSpec, info) -> Pred
     intrinsics = np.stack([_to_numpy(o["intrinsics"][0]) for o in outputs])
     poses_c2w = np.stack([_to_numpy(o["camera_poses"][0]) for o in outputs])
 
-    mask = np.stack([_to_numpy(o["mask"][0]).squeeze(-1) for o in outputs]) > 0.5
+    # infer() only emits "mask" when apply_mask=True - see the `if apply_mask:`
+    # block in mapanything/utils/inference.py. With --no-mapanything-mask the
+    # key is simply absent, and reading it unconditionally made the flag the
+    # README recommends for a raw-density comparison fail every scene with a
+    # KeyError. Absent means "nothing was masked", so every pixel starts valid
+    # and only the geometric checks below remove any.
+    if "mask" in outputs[0]:
+        mask = np.stack([_to_numpy(o["mask"][0]).squeeze(-1) for o in outputs]) > 0.5
+    else:
+        mask = np.ones(depth_z.shape, dtype=bool)
     mask &= np.isfinite(points_world).all(axis=-1) & (depth_z > 0)
 
     confidence = (

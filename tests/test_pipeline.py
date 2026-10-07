@@ -531,3 +531,51 @@ def test_wai_source_refuses_to_guess_a_resolution():
     source = WaiViewSource(lambda *a: _StubWaiDataset(*a), index=0, num_views=2)
     with pytest.raises(ValueError, match="image-size"):
         source.prepare(norm_type="dinov2", patch_size=14)
+
+
+def _fake_mapanything_outputs(num_views, height, width, with_mask):
+    """Shape-accurate stand-in for MapAnything.infer() output."""
+    import torch
+
+    outputs = []
+    for _ in range(num_views):
+        points = torch.rand(1, height, width, 3) + 1.0
+        view = {
+            "pts3d": points,
+            "pts3d_cam": points,
+            "depth_z": points[..., 2:3],
+            "intrinsics": torch.eye(3)[None],
+            "camera_poses": torch.eye(4)[None],
+        }
+        if with_mask:
+            keep = torch.ones(1, height, width, 1)
+            keep[:, : height // 2] = 0.0
+            view["mask"] = keep
+        outputs.append(view)
+    return outputs
+
+
+def test_mapanything_without_a_mask_key_keeps_every_pixel():
+    """--no-mapanything-mask removes the 'mask' key; that must not be an error.
+
+    infer() only sets "mask" inside its `if apply_mask:` block, so reading it
+    unconditionally made the flag the README recommends for a raw-density
+    comparison fail every scene with a KeyError.
+    """
+    from pointmap_bench.models import MODEL_REGISTRY, _prediction_from_mapanything
+
+    spec = MODEL_REGISTRY["mapanything"]
+    views, height, width = 2, 16, 24
+    images = np.zeros((views, height, width, 3), dtype=np.float32)
+
+    unmasked = _prediction_from_mapanything(
+        _fake_mapanything_outputs(views, height, width, with_mask=False),
+        images, spec, {},
+    )
+    assert unmasked.mask.all()
+
+    masked = _prediction_from_mapanything(
+        _fake_mapanything_outputs(views, height, width, with_mask=True),
+        images, spec, {},
+    )
+    assert masked.mask.mean() == pytest.approx(0.5, abs=1e-6)
