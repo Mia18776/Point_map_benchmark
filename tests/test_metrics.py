@@ -408,3 +408,33 @@ def test_sanity_check_catches_a_flipped_pose_convention(scene):
     broken_prediction.poses_c2w = invert_se3(broken_prediction.poses_c2w)
     broken = evaluate_without_gt(broken_prediction)
     assert broken["sanity/pose_pointmap_rel_err"] > 0.1
+
+
+def test_rel_extent_normaliser_does_not_depend_on_the_model_mask(scene):
+    """The scene extent is a property of the scene, not of the prediction.
+
+    Normalising by the extent of the per-model intersection would hand a model
+    that masks aggressively a smaller denominator, making identical geometry
+    look worse - the same tilt the coverage and completeness fixes removed.
+    """
+    args = (scene["depth_z"], scene["intrinsics"], scene["poses_c2w"])
+
+    noisy_points = depth_to_world_points(
+        scene["depth_z"], scene["intrinsics"], scene["poses_c2w"]
+    ) + 0.01
+
+    full = make_prediction(scene, points_world=noisy_points)
+    half = make_prediction(scene, points_world=noisy_points)
+    keep = np.ones_like(half.mask)
+    keep[:, :, WIDTH // 2 :] = False
+    half.mask = half.mask & keep
+
+    full_result = evaluate_with_gt(full, *args)
+    half_result = evaluate_with_gt(half, *args)
+
+    # accuracy_mean / accuracy_mean_rel_extent recovers the normaliser used.
+    def normaliser(result):
+        return result["sim3/accuracy_mean"] / result["sim3/accuracy_mean_rel_extent"]
+
+    assert half_result["gt/covered_ratio"] < 0.6
+    assert normaliser(half_result) == pytest.approx(normaliser(full_result), rel=1e-9)

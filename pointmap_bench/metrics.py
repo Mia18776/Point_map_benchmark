@@ -280,9 +280,16 @@ def evaluate_pointmaps_sim3(
     pred_aligned = apply_sim3(pred_matched, scale, rot, trans)
     err = np.linalg.norm(pred_aligned - gt_matched, axis=-1)
 
-    # Scene extent used to make the errors comparable across scenes.
+    # Scene extent used to make the errors comparable across scenes. It must be
+    # a property of the *scene*, not of the model: measuring it over the
+    # per-model intersection would give a model that masks aggressively a
+    # smaller, less spread-out subset, hence a smaller denominator, hence worse
+    # *_rel_extent on identical geometry. The completeness numerator already
+    # covers the whole GT, so a matched-set denominator would not even be
+    # measuring the same cloud top and bottom.
+    gt_reference = gt_points[gt_valid] if gt_valid is not None else gt_matched
     gt_extent = _safe(
-        np.linalg.norm(gt_matched - gt_matched.mean(axis=0), axis=-1).mean()
+        np.linalg.norm(gt_reference - gt_reference.mean(axis=0), axis=-1).mean()
     )
 
     out: Dict[str, float] = {
@@ -314,7 +321,6 @@ def evaluate_pointmaps_sim3(
 
     # Accuracy is prediction -> GT over the matched pixels; completeness is
     # GT -> prediction over *every* GT point, so unpredicted geometry counts.
-    gt_reference = gt_points[gt_valid] if gt_valid is not None else gt_matched
     accuracy = chamfer_metrics(pred_aligned, gt_matched, chamfer_max_points, seed)
     completeness = chamfer_metrics(pred_aligned, gt_reference, chamfer_max_points, seed)
     chamfer = {
