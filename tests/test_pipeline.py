@@ -407,3 +407,128 @@ def test_gt_evaluation_includes_the_official_columns(synthetic_scene):
     result = evaluate_with_gt(prediction, depth, intrinsics, poses)
     assert result["pose/auc_5"] == pytest.approx(100.0)
     assert result["rays/err_deg"] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_folder_source_prepares_views_and_ground_truth(synthetic_scene):
+    """The folder path must still produce exactly what the model needs."""
+    from pointmap_bench.sources import FolderViewSource
+
+    scene = Scene(
+        name="synthetic",
+        image_paths=list_images(synthetic_scene["image_dir"]),
+        gt_path=synthetic_scene["gt_path"],
+        sampling=sorted_stride_sampling(1, None),
+    )
+    prepared = FolderViewSource(scene).prepare(
+        norm_type="dinov2", patch_size=14, image_size=(WIDTH, HEIGHT)
+    )
+
+    assert prepared.num_views == NUM_VIEWS
+    assert prepared.resolution == (WIDTH, HEIGHT)
+    assert prepared.norm_type == "dinov2"
+    assert prepared.images.shape == (NUM_VIEWS, HEIGHT, WIDTH, 3)
+    assert prepared.view_names == scene.view_names
+
+    gt = prepared.ground_truth
+    assert gt is not None
+    assert gt["depth_z"].shape == (NUM_VIEWS, HEIGHT, WIDTH)
+    assert gt["intrinsics"].shape == (NUM_VIEWS, 3, 3)
+    assert gt["poses_c2w"].shape == (NUM_VIEWS, 4, 4)
+    assert prepared.provenance["views_digest"] == scene.views_digest
+    assert prepared.provenance["sampling/strategy"] == "sorted_filename_stride"
+
+
+def test_folder_source_without_ground_truth_still_prepares(synthetic_scene):
+    from pointmap_bench.sources import FolderViewSource
+
+    scene = Scene(name="s", image_paths=list_images(synthetic_scene["image_dir"]))
+    prepared = FolderViewSource(scene).prepare(
+        norm_type="dinov2", patch_size=14, image_size=(WIDTH, HEIGHT)
+    )
+    assert prepared.ground_truth is None
+    assert prepared.num_views == NUM_VIEWS
+
+
+class _StubWaiDataset:
+    """Mimics a map-anything WAI dataset sample, without needing the data.
+
+    The structure is what mapanything/datasets/base/base_dataset.py yields:
+    un-batched tensors, depthmap with a trailing axis, c2w camera_pose.
+    """
+
+    SIZE = 112
+
+    def __init__(self, norm_type, resolution, num_views):
+        self.norm_type = norm_type
+        self.resolution = resolution
+        self.num_views = num_views
+
+    def __getitem__(self, key):
+        import torch
+
+        index, _ar_idx = key
+        size = self.SIZE
+        intrinsics = np.array(
+            [[128.0, 0.0, (size - 1) / 2.0], [0.0, 128.0, (size - 1) / 2.0], [0.0, 0.0, 1.0]],
+            dtype=np.float32,
+        )
+        views = []
+        for view_index in range(self.num_views):
+            pose = np.eye(4, dtype=np.float32)
+            pose[0, 3] = 0.25 * view_index
+            views.append(
+                {
+                    "img": torch.zeros(3, size, size),
+                    "depthmap": np.full((size, size, 1), 2.0, dtype=np.float32),
+                    "camera_intrinsics": intrinsics,
+                    "camera_pose": pose,
+                    "data_norm_type": self.norm_type,
+                    "true_shape": np.int32((size, size)),
+                    "label": "stub_scene",
+                    "instance": f"images/{index:03d}_{view_index:03d}.png",
+                }
+            )
+        return views
+
+
+def test_wai_source_converts_a_dataset_sample_to_the_common_format():
+    """A WAI sample must arrive in exactly the shape a model wrapper expects."""
+    from pointmap_bench.sources import WaiViewSource
+
+    built = []
+
+    def factory(norm_type, resolution, num_views):
+        built.append((norm_type, resolution, num_views))
+        return _StubWaiDataset(norm_type, resolution, num_views)
+
+    source = WaiViewSource(
+        factory, index=7, num_views=3, dataset_name="eth3d", seed=0
+    )
+    size = _StubWaiDataset.SIZE
+    prepared = source.prepare(
+        norm_type="dinov2", patch_size=14, image_size=(size, size)
+    )
+
+    assert prepared.num_views == 3
+    assert prepared.views[0]["img"].shape == (1, 3, size, size)
+    assert prepared.views[0]["data_norm_type"] == ["dinov2"]
+    assert prepared.views[0]["true_shape"].shape == (1, 2)
+    assert prepared.images.shape == (3, size, size, 3)
+    assert prepared.ground_truth["depth_z"].shape == (3, size, size)
+    assert prepared.ground_truth["poses_c2w"].shape == (3, 4, 4)
+    assert prepared.provenance["sampling/strategy"] == "covisibility_random_walk"
+    assert prepared.provenance["sampling/set_index"] == 7
+    assert prepared.provenance["sampling/dataset"] == "eth3d"
+
+    # One dataset per normalisation, built once and reused.
+    source.prepare(norm_type="dinov2", patch_size=14, image_size=(size, size))
+    source.prepare(norm_type="dust3r", patch_size=16, image_size=(size, size))
+    assert [n for n, _, _ in built] == ["dinov2", "dust3r"]
+
+
+def test_wai_source_refuses_to_guess_a_resolution():
+    from pointmap_bench.sources import WaiViewSource
+
+    source = WaiViewSource(lambda *a: _StubWaiDataset(*a), index=0, num_views=2)
+    with pytest.raises(ValueError, match="image-size"):
+        source.prepare(norm_type="dinov2", patch_size=14)

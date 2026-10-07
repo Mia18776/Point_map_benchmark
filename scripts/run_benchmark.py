@@ -41,7 +41,6 @@ from pointmap_bench.data import (  # noqa: E402
     check_common_size,
     discover_scenes,
     list_images,
-    load_ground_truth,
     sorted_stride_sampling,
 )
 from pointmap_bench.export import (  # noqa: E402
@@ -59,6 +58,7 @@ from pointmap_bench.models import (  # noqa: E402
     run_model,
 )
 from pointmap_bench.report import write_reports  # noqa: E402
+from pointmap_bench.sources import FolderViewSource  # noqa: E402
 
 
 def parse_image_size(value: str):
@@ -282,16 +282,22 @@ def main() -> int:
                 **scene.provenance(),
             }
             try:
+                # The sample is built for *this* model's normalisation and
+                # grid; the source decides which views that means.
+                prepared = FolderViewSource(scene).prepare(
+                    norm_type=norm_type,
+                    patch_size=spec.patch_size,
+                    resolution_set=spec.resolution_set,
+                    image_size=args.image_size,
+                )
+                record.update(prepared.provenance)
+
                 prediction = run_model(
                     spec,
-                    scene.image_paths,
-                    scene_name=scene.name,
-                    device=args.device,
-                    image_size=args.image_size,
-                    mast3r_checkpoint_dir=args.mast3r_checkpoint_dir,
-                    mapanything_apply_mask=not args.no_mapanything_mask,
+                    prepared,
                     model=model,
-                    norm_type=norm_type,
+                    device=args.device,
+                    mapanything_apply_mask=not args.no_mapanything_mask,
                 )
                 prediction = prediction.filter_by_confidence(
                     args.confidence_percentile
@@ -301,18 +307,13 @@ def main() -> int:
                     evaluate_without_gt(prediction, max_pairs=args.max_pairs)
                 )
 
-                if scene.gt_path:
-                    width = prediction.depth_z.shape[2]
-                    height = prediction.depth_z.shape[1]
-                    ground_truth = load_ground_truth(
-                        scene.gt_path, scene.image_paths, (width, height)
-                    )
+                if prepared.ground_truth:
                     record.update(
                         evaluate_with_gt(
                             prediction,
-                            ground_truth["depth_z"],
-                            ground_truth["intrinsics"],
-                            ground_truth["poses_c2w"],
+                            prepared.ground_truth["depth_z"],
+                            prepared.ground_truth["intrinsics"],
+                            prepared.ground_truth["poses_c2w"],
                         )
                     )
 

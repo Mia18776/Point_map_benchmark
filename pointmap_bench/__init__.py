@@ -17,6 +17,7 @@ from .models import (
 )
 from .prediction import Prediction
 from .report import aggregate_by_model, write_reports
+from .sources import FolderViewSource, PreparedViews, ViewSource, WaiViewSource
 
 __version__ = "0.1.0"
 

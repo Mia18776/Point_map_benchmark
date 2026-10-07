@@ -218,6 +218,35 @@ depth resampling identical for every model.
 | `--max-pairs N` | view pairs sampled for the consistency metric (default 30) |
 | `--fail-fast` | abort on the first model error instead of recording it |
 
+## Where the views come from
+
+The input side is an interface with two implementations
+(`pointmap_bench/sources.py`), both producing the same `PreparedViews`, so
+inference, metrics, export and reporting are identical whichever is used:
+
+| source | views chosen by | ground truth |
+| --- | --- | --- |
+| `FolderViewSource` | sorted filename + `--stride` | optional `gt.npz` |
+| `WaiViewSource` | random walk over a precomputed covisibility matrix, so the views form one connected component | from the dataset |
+
+`WaiViewSource` wraps a map-anything WAI dataset (ETH3D, ScanNet++v2,
+TartanAirV2-WB) and uses **the sampling protocol map-anything's own
+`dense_n_view` benchmark uses**, which is what makes a number comparable to a
+published one. A folder read in filename order cannot do that, however correct
+the metrics downstream are.
+
+It takes a `dataset_factory(norm_type, resolution, num_views)` because a WAI
+dataset fixes its normalisation at construction while the models here need
+three different ones; one dataset is built per normalisation and cached. It
+also requires an explicit `--image-size`, since there is no per-model native
+mapping to fall back on.
+
+> **Status.** `WaiViewSource` is implemented and unit-tested against a stub
+> dataset, but is **not yet wired to the CLI** — that needs the WAI
+> benchmarking data on disk (see map-anything's
+> `data_processing/download_and_extract_benchmarking_data.py`). The CLI
+> currently always uses `FolderViewSource`.
+
 ## Data layout
 
 Single scene:

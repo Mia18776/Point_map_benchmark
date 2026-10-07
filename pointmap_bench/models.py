@@ -28,8 +28,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import torch
 
-from .data import load_views, views_to_rgb
 from .prediction import Prediction, prediction_from_wrapper_output, _to_numpy
+from .sources import PreparedViews
 
 
 @dataclass
@@ -285,7 +285,7 @@ def load_model(spec: ModelSpec, device: str, mast3r_checkpoint_dir: Optional[str
     return model, str(cfg.model.data_norm_type)
 
 
-def _prepare_views(views, device: str, spec: ModelSpec, scene_name: str, image_paths):
+def _prepare_views(views, device: str, spec: ModelSpec, scene_name: str, view_names):
     """Move views to the device and add the extra keys some wrappers require."""
     prepared = []
     for index, view in enumerate(views):
@@ -296,7 +296,7 @@ def _prepare_views(views, device: str, spec: ModelSpec, scene_name: str, image_p
             # MASt3R's sparse global aligner keys its on-disk cache off these,
             # and load_images stores `instance` as a bare str (not a list).
             entry["label"] = [scene_name]
-            entry["instance"] = [os.path.basename(image_paths[index])]
+            entry["instance"] = [os.path.basename(str(view_names[index]))]
         prepared.append(entry)
     return prepared
 
@@ -351,62 +351,47 @@ def _measure(device: str):
 
 def run_model(
     spec: ModelSpec,
-    image_paths: Sequence[str],
-    scene_name: str,
+    prepared: PreparedViews,
+    model: Any,
     device: str = "cuda",
-    image_size: Optional[Tuple[int, int]] = None,
-    mast3r_checkpoint_dir: Optional[str] = None,
     mapanything_apply_mask: bool = True,
     mapanything_minibatch_size: Optional[int] = 1,
-    model: Any = None,
-    norm_type: Optional[str] = None,
 ) -> Prediction:
-    """Run one model on one scene and return a :class:`Prediction`.
+    """Run one already-loaded model on one already-prepared multi-view sample.
+
+    Loading the views is the caller's job, through a
+    :class:`~pointmap_bench.sources.ViewSource`: the sample has to be built for
+    *this* model's normalisation and grid, and keeping that out of here is what
+    lets a folder of images and a WAI dataset feed the same code path.
 
     Args:
         spec: The model to run.
-        image_paths: Images of the scene, in order.
-        scene_name: Used for MASt3R's cache keys and for reporting.
+        prepared: Views, ground truth and provenance for one scene.
+        model: Loaded model, in eval mode on ``device``.
         device: Torch device string.
-        image_size: Optional (width, height) shared by all models. When None,
-            each model uses its own native resolution mapping.
-        mast3r_checkpoint_dir: Directory holding the MASt3R checkpoint.
         mapanything_apply_mask: Pass through to ``MapAnything.infer``; keeps the
             model's recommended edge/ambiguity masking.
         mapanything_minibatch_size: Memory-efficient inference minibatch size.
-        model: Pre-loaded model, to avoid reloading across scenes.
-        norm_type: Normalisation type matching the pre-loaded model.
+
+    Returns:
+        A :class:`~pointmap_bench.prediction.Prediction`.
     """
     reason = check_availability(spec, device)
     if reason:
         raise ModelUnavailable(reason)
 
-    load_seconds = 0.0
-    if model is None:
-        with _measure(device) as load_stats:
-            model, norm_type = load_model(spec, device, mast3r_checkpoint_dir)
-        load_seconds = load_stats["seconds"]
-    if norm_type is None:
-        norm_type = spec.norm_type
-
-    views, resolution = load_views(
-        image_paths,
-        norm_type=norm_type,
-        patch_size=spec.patch_size,
-        resolution_set=spec.resolution_set,
-        image_size=image_size,
+    views = _prepare_views(
+        prepared.views, device, spec, prepared.scene_name, prepared.view_names
     )
-    images = views_to_rgb(views, norm_type)
-    prepared = _prepare_views(views, device, spec, scene_name, image_paths)
+    images = prepared.images
 
     info: Dict[str, Any] = {
         "model": spec.key,
         "display_name": spec.display_name,
-        "num_views": len(image_paths),
-        "resolution": f"{resolution[0]}x{resolution[1]}",
-        "norm_type": norm_type,
+        "num_views": prepared.num_views,
+        "resolution": f"{prepared.resolution[0]}x{prepared.resolution[1]}",
+        "norm_type": prepared.norm_type,
         "device": device,
-        "load_seconds": load_seconds,
     }
 
     is_mapanything = spec.loader == "hf"
@@ -414,7 +399,7 @@ def run_model(
         with _measure(device) as run_stats:
             if is_mapanything:
                 outputs = model.infer(
-                    prepared,
+                    views,
                     memory_efficient_inference=True,
                     minibatch_size=mapanything_minibatch_size,
                     use_amp=True,
@@ -425,10 +410,10 @@ def run_model(
             else:
                 # MASt3R re-enables grad internally for its global alignment;
                 # torch.enable_grad() inside this block takes precedence.
-                outputs = model(prepared)
+                outputs = model(views)
 
     info["inference_seconds"] = run_stats["seconds"]
-    info["seconds_per_view"] = run_stats["seconds"] / max(len(image_paths), 1)
+    info["seconds_per_view"] = run_stats["seconds"] / max(prepared.num_views, 1)
     if "peak_memory_mb" in run_stats:
         info["peak_memory_mb"] = run_stats["peak_memory_mb"]
 
