@@ -236,6 +236,39 @@ def test_consistency_is_invariant_to_global_scale(scene):
     )
 
 
+def test_chamfer_is_zero_for_identical_clouds_even_when_subsampled():
+    """Subsampling must not invent a distance floor.
+
+    Subsampling both sides makes the query and reference points land on
+    different samples of the same surface, so identical clouds score the
+    sampling spacing instead of zero - and the floor depends on how many
+    points a model produced, which biases the comparison toward sparse
+    predictions. This test uses more points than max_points on purpose; the
+    original one stayed under the threshold and so never reached the code
+    that was wrong.
+    """
+    rng = np.random.default_rng(2)
+    cloud = rng.standard_normal((5000, 3))
+    result = chamfer_metrics(cloud, cloud.copy(), max_points=200)
+    assert result["accuracy_mean"] == pytest.approx(0.0, abs=1e-12)
+    assert result["completeness_mean"] == pytest.approx(0.0, abs=1e-12)
+    assert result["chamfer_mean"] == pytest.approx(0.0, abs=1e-12)
+
+
+def test_chamfer_still_measures_a_real_offset_when_subsampled():
+    """A thin surface moved along its normal must report exactly that offset."""
+    rng = np.random.default_rng(3)
+    count = 5000
+    plane = np.column_stack(
+        [rng.uniform(-5, 5, count), rng.uniform(-5, 5, count), np.zeros(count)]
+    )
+    result = chamfer_metrics(
+        plane + np.array([0.0, 0.0, 0.5]), plane, max_points=500
+    )
+    assert result["accuracy_mean"] == pytest.approx(0.5, abs=1e-6)
+    assert result["completeness_mean"] == pytest.approx(0.5, abs=1e-6)
+
+
 def test_chamfer_of_identical_clouds_is_zero():
     rng = np.random.default_rng(1)
     cloud = rng.standard_normal((500, 3))

@@ -113,12 +113,22 @@ def chamfer_metrics(
     * *accuracy*: distance from each predicted point to the closest GT point.
     * *completeness*: distance from each GT point to the closest predicted point.
 
-    Both clouds are uniformly subsampled to ``max_points`` for tractability.
+    Only the *query* side of each direction is subsampled, to bound the number
+    of nearest-neighbour lookups. The *reference* side is kept whole.
+
+    Subsampling both sides - the obvious reading of "subsample for
+    tractability" - is wrong, and quietly so: the query and reference points
+    then land on different samples of the same surface, so the distance
+    measures the sampling spacing rather than the geometric error. Two
+    identical clouds of 750k points scored 0.064 instead of 0 that way. Worse,
+    the floor depends on how many points a model produced, so a model that
+    masks more pixels is subsampled less and gets a lower floor - the same
+    bias toward sparse predictions that `completeness` is careful to avoid.
     """
     pred = np.asarray(pred_points, dtype=np.float64).reshape(-1, 3)
     gt_pts = np.asarray(gt_points, dtype=np.float64).reshape(-1, 3)
-    pred = pred[_subsample(pred.shape[0], max_points, seed)]
-    gt_pts = gt_pts[_subsample(gt_pts.shape[0], max_points, seed + 1)]
+    pred_query = pred[_subsample(pred.shape[0], max_points, seed)]
+    gt_query = gt_pts[_subsample(gt_pts.shape[0], max_points, seed + 1)]
 
     if pred.shape[0] == 0 or gt_pts.shape[0] == 0:
         return {
@@ -129,8 +139,8 @@ def chamfer_metrics(
             "chamfer_mean": float("nan"),
         }
 
-    acc = nearest_neighbour_distances(pred, gt_pts)
-    comp = nearest_neighbour_distances(gt_pts, pred)
+    acc = nearest_neighbour_distances(pred_query, gt_pts)
+    comp = nearest_neighbour_distances(gt_query, pred)
     return {
         "accuracy_mean": _safe(acc.mean()),
         "accuracy_median": _safe(np.median(acc)),
