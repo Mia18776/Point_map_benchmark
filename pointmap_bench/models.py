@@ -214,7 +214,10 @@ def check_availability(spec: ModelSpec, device: str) -> Optional[str]:
     if missing:
         return f"missing module(s) {', '.join(missing)}. {spec.install_hint}"
     if spec.requires_cuda and not torch.cuda.is_available():
-        return f"{spec.display_name} requires a CUDA device (its wrapper queries torch.cuda at init)"
+        return (
+            f"{spec.display_name} requires a CUDA device "
+            "(its wrapper queries torch.cuda at init)"
+        )
     if spec.requires_cuda and not device.startswith("cuda"):
         return f"{spec.display_name} requires --device cuda"
     return None
