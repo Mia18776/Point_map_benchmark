@@ -69,6 +69,24 @@ Plus `depth/*` (per-view z-depth after a single median-scale alignment) and
 `pose/*` (pairwise relative rotation/translation errors, RRA/RTA at 5°, and ATE
 after similarity alignment of the camera centres).
 
+Two columns are computed by **map-anything's own functions** rather than
+re-derived here, so they can be read directly against the numbers in its
+`benchmarking/dense_n_view` tables:
+
+| metric | meaning |
+| --- | --- |
+| `pose/auc_5`, `pose/auc_30` | AUC of the per-pair relative-pose error (`max(rotation, translation)`) up to 5° / 30°, as a percentage — upstream's `pose_auc_5` |
+| `rays/err_deg` | angular error between predicted and GT unit ray directions, i.e. how wrong the recovered intrinsics are — upstream's `ray_dirs_err_deg` |
+
+They live in `pointmap_bench/official_metrics.py`, the one module that needs
+torch and `mapanything`; everything else stays NumPy-only. If those imports are
+unavailable the two columns are skipped rather than failing the run.
+
+One definition deliberately differs: upstream's translation term folds the
+direction ambiguity, so it lies in [0°, 90°] and scores a 180°-flipped baseline
+as correct. `pose/trans_ang_err_deg_*` here is the stricter, sign-sensitive
+version. Both are reported — `pose/auc_*` uses upstream's.
+
 `sim3/*` also reports Chamfer accuracy (prediction → GT) and completeness
 (GT → prediction), both raw and normalised by the GT scene extent so scenes of
 different physical size can be averaged.

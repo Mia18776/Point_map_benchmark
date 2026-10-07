@@ -628,6 +628,14 @@ def evaluate_with_gt(
     )
     out.update(evaluate_poses(prediction.poses_c2w, gt_poses_c2w))
     out.update(evaluate_depth(prediction.depth_z, gt_depth_z, valid))
+
+    # Pose AUC and the ray-direction error come from map-anything's own
+    # implementations, so those two columns can be read against the numbers in
+    # its dense_n_view tables rather than only against each other. Skipped
+    # (not failed) when the package or torch is unavailable.
+    from .official_metrics import evaluate_official
+
+    out.update(evaluate_official(prediction, gt_intrinsics, gt_poses_c2w))
     return out
 
 

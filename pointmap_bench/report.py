@@ -47,6 +47,9 @@ METRIC_DIRECTIONS: Dict[str, str] = {
     "pose/rot_err_deg_median": "lower",
     "pose/trans_ang_err_deg_median": "lower",
     "pose/rra_5deg": "higher",
+    "pose/auc_5": "higher",
+    "pose/auc_30": "higher",
+    "rays/err_deg": "lower",
     "pose/rta_5deg": "higher",
     "pose/ate_rmse_rel": "lower",
 }
@@ -106,6 +109,8 @@ GT_COLUMNS = (
     "depth/delta_1.25",
     "pose/rot_err_deg_median",
     "pose/trans_ang_err_deg_median",
+    "pose/auc_5",
+    "rays/err_deg",
     "pose/ate_rmse_rel",
     "metric/scale_abs_rel",
 )

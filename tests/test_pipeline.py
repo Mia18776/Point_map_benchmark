@@ -340,3 +340,70 @@ def test_report_carries_the_run_configuration(tmp_path):
     assert "views_digest" not in aggregated["a"]
     assert "sampling/stride" not in aggregated["a"]
     assert aggregated["a"]["num_views"] == 3
+
+
+def _pose_from(rotation, translation):
+    pose = np.eye(4)
+    pose[:3, :3] = rotation
+    pose[:3, 3] = translation
+    return pose
+
+
+def test_official_pose_auc_and_ray_error_match_a_perfect_prediction(synthetic_scene):
+    """Upstream-defined metrics, computed with upstream's own functions."""
+    from pointmap_bench.official_metrics import pose_auc, ray_direction_error_deg
+
+    poses = synthetic_scene["poses_c2w"]
+    intrinsics = synthetic_scene["intrinsics"]
+
+    perfect = pose_auc(poses, poses, thresholds=(5, 30))
+    assert perfect["pose/auc_5"] == pytest.approx(100.0)
+    assert perfect["pose/auc_30"] == pytest.approx(100.0)
+
+    rays = ray_direction_error_deg(intrinsics, intrinsics, HEIGHT, WIDTH)
+    assert rays["rays/err_deg"] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_official_metrics_degrade_when_the_prediction_is_wrong(synthetic_scene):
+    poses = synthetic_scene["poses_c2w"]
+    intrinsics = synthetic_scene["intrinsics"]
+    from pointmap_bench.geometry import quat_xyzw_to_rotmat
+    from pointmap_bench.official_metrics import pose_auc, ray_direction_error_deg
+
+    # Rotate one camera by ~16 degrees: every pair touching it is now wrong.
+    tilt = quat_xyzw_to_rotmat(np.array([0.0, 0.14, 0.0, 0.99]))
+    broken = poses.copy()
+    broken[1] = _pose_from(tilt @ poses[1][:3, :3], poses[1][:3, 3])
+    degraded = pose_auc(broken, poses, thresholds=(5, 30))
+    assert degraded["pose/auc_5"] < 100.0
+    assert degraded["pose/auc_30"] < 100.0
+
+    # A 5% focal error is a ray-direction error of order a degree.
+    wrong_focal = intrinsics.copy()
+    wrong_focal[:, 0, 0] *= 1.05
+    wrong_focal[:, 1, 1] *= 1.05
+    rays = ray_direction_error_deg(wrong_focal, intrinsics, HEIGHT, WIDTH)
+    assert 0.1 < rays["rays/err_deg"] < 5.0
+
+
+def test_gt_evaluation_includes_the_official_columns(synthetic_scene):
+    """evaluate_with_gt must surface the upstream metrics alongside its own."""
+    from pointmap_bench.geometry import depth_to_camera_points, depth_to_world_points
+
+    depth = synthetic_scene["depth_z"]
+    intrinsics = synthetic_scene["intrinsics"]
+    poses = synthetic_scene["poses_c2w"]
+    points_cam = depth_to_camera_points(depth, intrinsics)
+    prediction = Prediction(
+        points_world=depth_to_world_points(depth, intrinsics, poses),
+        points_cam=points_cam,
+        depth_z=depth,
+        intrinsics=intrinsics,
+        poses_c2w=poses,
+        mask=depth > 0,
+        images=np.zeros(depth.shape + (3,), dtype=np.float32),
+        is_metric=True,
+    )
+    result = evaluate_with_gt(prediction, depth, intrinsics, poses)
+    assert result["pose/auc_5"] == pytest.approx(100.0)
+    assert result["rays/err_deg"] == pytest.approx(0.0, abs=1e-9)
