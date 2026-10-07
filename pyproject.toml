@@ -25,6 +25,9 @@ packages = ["pointmap_bench"]
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+# Slide/report generators, not library code: long literal strings of prose are
+# the point there, and wrapping them would hurt rather than help.
+extend-exclude = ["docs"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
