@@ -63,6 +63,7 @@ from pointmap_bench.sources import (  # noqa: E402
     WaiViewSource,
     wai_dataset_factory,
     wai_dataset_spec,
+    wai_native_resolution,
 )
 
 
@@ -74,14 +75,16 @@ def parse_image_size(value: str):
         raise argparse.ArgumentTypeError(
             f"Expected WIDTHxHEIGHT (e.g. 448x336), got '{value}'"
         ) from exc
-    try:
-        check_common_size((width, height))
-    except ValueError as exc:
-        # argparse replaces a bare ValueError from a type= callable with its
-        # own generic "invalid value" text, throwing away the explanation of
-        # which patch size the number is not divisible by.
-        raise argparse.ArgumentTypeError(str(exc)) from exc
+    if width <= 0 or height <= 0:
+        raise argparse.ArgumentTypeError(f"Image size must be positive, got '{value}'")
+    # Divisibility depends on which models run, so main() checks it once
+    # --models is known (see check_image_size_for_models).
     return width, height
+
+
+def check_image_size_for_models(image_size, model_keys) -> None:
+    """Raise ValueError if ``image_size`` is not a grid every selected model accepts."""
+    check_common_size(image_size, [MODEL_REGISTRY[key].patch_size for key in model_keys])
 
 
 def positive_int(value: str) -> int:
@@ -146,8 +149,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--image-size",
         type=parse_image_size,
         help=(
-            "Force every model onto the same WIDTHxHEIGHT grid (multiple of 112, "
-            "e.g. 448x336). Required for ground-truth evaluation."
+            "Force every model onto the same WIDTHxHEIGHT grid, divisible by the "
+            "patch size of every selected model (a multiple of 112, e.g. 448x336, "
+            "fits all; 518x392 fits the patch-14 ones). Required for "
+            "ground-truth evaluation."
         ),
     )
     parser.add_argument(
@@ -280,7 +285,6 @@ def build_wai_sources(args):
         for flag, value in (
             ("--wai-root", args.wai_root),
             ("--wai-metadata-dir", args.wai_metadata_dir),
-            ("--image-size", args.image_size),
         )
         if not value
     ]
@@ -292,12 +296,28 @@ def build_wai_sources(args):
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
 
+    # Without --image-size every model runs at the resolution upstream
+    # benchmarks it at for this dataset; resolve them all now so a missing
+    # config fails before any model is loaded.
+    native = {}
+    if args.image_size is None:
+        for long_side in sorted({MODEL_REGISTRY[key].resolution_set for key in args.models}):
+            try:
+                native[long_side] = wai_native_resolution(args.wai_dataset, long_side)
+            except ValueError as exc:
+                raise SystemExit(str(exc)) from exc
+        print(
+            "Native resolutions: "
+            + ", ".join(f"{side} -> {w}x{h}" for side, (w, h) in native.items())
+        )
+
     # One dataset per (normalisation, resolution), shared by every scene.
     factory = functools.lru_cache(maxsize=None)(
         wai_dataset_factory(spec, args.wai_root, args.wai_metadata_dir)
     )
+    listing_size = args.image_size or next(iter(native.values()))
     all_scenes = [
-        str(s) for s in factory("dinov2", args.image_size, args.wai_num_views).scenes
+        str(s) for s in factory("dinov2", listing_size, args.wai_num_views).scenes
     ]
     unknown = set(args.wai_scenes or []) - set(all_scenes)
     if unknown:
@@ -315,6 +335,7 @@ def build_wai_sources(args):
             name=name,
             dataset_name=args.wai_dataset,
             seed=seed,
+            native_resolution=native.__getitem__,
         )
         provenance = {
             "num_views": args.wai_num_views,
@@ -337,6 +358,11 @@ def main() -> int:
 
     if not (args.images or args.scenes_root or args.wai_dataset):
         build_parser().error("one of --images, --scenes-root or --wai-dataset is required")
+    if args.image_size is not None:
+        try:
+            check_image_size_for_models(args.image_size, args.models)
+        except ValueError as exc:
+            build_parser().error(str(exc))
 
     if args.wai_dataset:
         sources = build_wai_sources(args)
@@ -347,7 +373,7 @@ def main() -> int:
         isinstance(source, FolderViewSource) and source.scene.gt_path
         for _, source, _ in sources
     )
-    if has_gt and args.image_size is None:
+    if has_gt and args.image_size is None and not args.wai_dataset:
         print(
             "[warn] Ground truth was found but --image-size is not set. Each model "
             "will run at its own native resolution; the GT is resized to match each "

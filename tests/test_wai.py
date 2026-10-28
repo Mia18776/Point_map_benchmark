@@ -221,3 +221,95 @@ def test_dataset_without_a_test_split_is_named_in_the_error(tmp_path):
     root = write_configs(tmp_path, [("eth3d", "ETH3DWAI", "eth3d", 0.025)])
     with pytest.raises(ValueError, match="No WAI test config"):
         wai_dataset_spec("tav2_wb", str(root))
+
+
+# --------------------------------------------------------------------------
+# Native (per-model) resolution
+# --------------------------------------------------------------------------
+
+RESOLUTION_OPTIONS = """
+518_1_52_ar: (518, 336) # 3:2
+512_1_52_ar: (512, 336)
+518_1_00_ar: (518, 518)
+518_many_ar: '[(518, 518), (518, 336)]'
+"""
+
+
+def write_benchmark_config(configs, long_side, **resolutions):
+    config_dir = Path(configs) / "configs" / "dataset"
+    (config_dir / "resolution_options").mkdir(exist_ok=True)
+    (config_dir / "resolution_options" / "default.yaml").write_text(RESOLUTION_OPTIONS)
+    lines = [
+        f"resolution_test_{name}: ${{dataset.resolution_options.{option}}}"
+        for name, option in resolutions.items()
+    ]
+    path = config_dir / f"benchmark_{long_side}_eth3d_snpp.yaml"
+    path.write_text("defaults:\n  - default\n" + "\n".join(lines) + "\n")
+    return path
+
+
+def test_native_resolution_is_read_per_model_long_side(configs):
+    from pointmap_bench.sources import wai_native_resolution
+
+    write_benchmark_config(configs, 518, eth3d="518_1_52_ar", scannetpp="518_1_00_ar")
+    write_benchmark_config(configs, 512, eth3d="512_1_52_ar")
+
+    assert wai_native_resolution("eth3d", 518, configs) == (518, 336)
+    assert wai_native_resolution("eth3d", 512, configs) == (512, 336)
+    assert wai_native_resolution("scannetpp", 518, configs) == (518, 518)
+
+
+def test_native_resolution_refuses_what_upstream_does_not_define(configs):
+    from pointmap_bench.sources import wai_native_resolution
+
+    write_benchmark_config(configs, 518, eth3d="518_1_52_ar")
+    with pytest.raises(ValueError, match="--image-size"):
+        wai_native_resolution("eth3d", 504, configs)  # no benchmark_504 config
+    with pytest.raises(ValueError, match="--image-size"):
+        wai_native_resolution("scannetpp", 518, configs)  # not in that config
+    write_benchmark_config(configs, 518, eth3d="518_many_ar")
+    with pytest.raises(ValueError, match="single"):
+        wai_native_resolution("eth3d", 518, configs)
+
+
+def test_wai_source_runs_each_model_at_its_native_resolution():
+    pytest.importorskip("mapanything.utils.image")
+    import numpy as np
+    import torch
+
+    from pointmap_bench.sources import WaiViewSource
+
+    built = []
+
+    def factory(norm_type, resolution, num_views):
+        built.append((norm_type, resolution))
+        width, height = resolution
+
+        def view(i):
+            return {
+                "img": torch.zeros(3, height, width),
+                "data_norm_type": norm_type,
+                "true_shape": np.array([height, width]),
+                "depthmap": np.ones((height, width, 1), dtype=np.float32),
+                "camera_intrinsics": np.eye(3),
+                "camera_pose": np.eye(4),
+                "instance": f"f{i}",
+            }
+
+        class Dataset:
+            def __getitem__(self, key):
+                return [view(i) for i in range(num_views)]
+
+        return Dataset()
+
+    native = {518: (518, 336), 512: (512, 336)}
+    source = WaiViewSource(factory, index=0, num_views=2, native_resolution=native.__getitem__)
+
+    assert source.prepare("dinov2", patch_size=14, resolution_set=518).resolution == (518, 336)
+    assert source.prepare("dust3r", patch_size=16, resolution_set=512).resolution == (512, 336)
+    assert built == [("dinov2", (518, 336)), ("dust3r", (512, 336))]
+    # An explicit shared size still wins.
+    assert source.prepare("dinov2", 14, 518, image_size=(448, 336)).resolution == (448, 336)
+
+    with pytest.raises(ValueError, match="patch size 16"):
+        source.prepare("dust3r", patch_size=16, resolution_set=518)  # 518 % 16 != 0

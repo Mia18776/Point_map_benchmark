@@ -313,6 +313,59 @@ def wai_dataset_spec(name: str, mapanything_root: Optional[str] = None) -> WaiDa
     )
 
 
+def wai_native_resolution(
+    name: str, long_side: int, mapanything_root: Optional[str] = None
+) -> Tuple[int, int]:
+    """The (width, height) upstream benchmarks dataset ``name`` at for models
+    whose native long side is ``long_side`` (518, 512, ...).
+
+    Upstream runs every model at its own resolution but the dataset's aspect
+    ratio: ``configs/dataset/benchmark_<long_side>_*.yaml`` sets
+    ``resolution_test_<name>`` to an entry of ``resolution_options``, e.g.
+    ETH3D at 518x336 for MapAnything and 512x336 for MASt3R. The dataset class
+    crops and resizes images and GT together, so each model is scored on its
+    own grid and nothing has to be resampled.
+    """
+    import ast
+    import glob
+
+    import yaml
+
+    config_dir = _wai_config_dir(mapanything_root)
+    key = f"resolution_test_{name}"
+    refs = {}
+    for path in sorted(glob.glob(os.path.join(config_dir, f"benchmark_{long_side}_*.yaml"))):
+        with open(path) as fh:
+            cfg = yaml.safe_load(fh) or {}
+        if key in cfg:
+            refs[path] = str(cfg[key])
+    if not refs:
+        raise ValueError(
+            f"No upstream benchmark config gives '{key}' at long side {long_side} "
+            f"(looked for {config_dir}/benchmark_{long_side}_*.yaml). Pass "
+            "--image-size to run every model on one shared grid instead."
+        )
+    if len(set(refs.values())) > 1:
+        raise ValueError(f"Upstream benchmark configs disagree on '{key}': {refs}")
+    ref = next(iter(refs.values()))
+    inner = _INTERPOLATION.fullmatch(ref)
+    prefix = "dataset.resolution_options."
+    if not inner or not inner.group(1).startswith(prefix):
+        raise ValueError(f"Cannot resolve {key} = {ref!r} in {next(iter(refs))}")
+    with open(os.path.join(config_dir, "resolution_options", "default.yaml")) as fh:
+        options = yaml.safe_load(fh)
+    option = inner.group(1)[len(prefix):]
+    try:
+        value = ast.literal_eval(str(options[option]))
+    except (KeyError, ValueError, SyntaxError) as exc:
+        raise ValueError(f"resolution_options has no '{option}'") from exc
+    # A "*_many_ar" option is a list of sizes for training, not one test size.
+    is_size = isinstance(value, tuple) and len(value) == 2
+    if not (is_size and all(isinstance(v, int) for v in value)):
+        raise ValueError(f"resolution_options '{option}' is not a single (W, H): {value!r}")
+    return value
+
+
 def wai_dataset_factory(spec: WaiDatasetSpec, root: str, metadata_dir: str):
     """Build the ``dataset_factory`` :class:`WaiViewSource` expects.
 
@@ -433,6 +486,9 @@ class WaiViewSource(ViewSource):
         dataset_name: Dataset the sample came from, recorded as provenance.
         seed: Dataset seed, recorded as provenance - the covisibility walk is
             random, so a result without its seed cannot be repeated.
+        native_resolution: ``long_side -> (width, height)``, used when no
+            shared ``image_size`` is given so each model runs at its own
+            resolution (see :func:`wai_native_resolution`).
     """
 
     def __init__(
@@ -443,8 +499,10 @@ class WaiViewSource(ViewSource):
         name: Optional[str] = None,
         dataset_name: str = "wai",
         seed: Optional[int] = None,
+        native_resolution: Optional[Callable[[int], Tuple[int, int]]] = None,
     ):
         self.dataset_factory = dataset_factory
+        self.native_resolution = native_resolution
         self.index = int(index)
         self.num_views = int(num_views)
         self.name = name or f"{dataset_name}_{index:05d}"
@@ -466,11 +524,18 @@ class WaiViewSource(ViewSource):
         image_size: Optional[Tuple[int, int]] = None,
     ) -> PreparedViews:
         if image_size is None:
-            raise ValueError(
-                "WaiViewSource needs an explicit --image-size: a WAI dataset is "
-                "constructed for one resolution, so there is no per-model native "
-                "mapping to fall back on."
-            )
+            if self.native_resolution is None:
+                raise ValueError(
+                    "WaiViewSource needs either an explicit image_size or a "
+                    "native_resolution lookup: a WAI dataset is constructed for "
+                    "one resolution."
+                )
+            image_size = self.native_resolution(resolution_set)
+            if any(side % patch_size for side in image_size):
+                raise ValueError(
+                    f"Native resolution {image_size[0]}x{image_size[1]} is not "
+                    f"divisible by this model's patch size {patch_size}"
+                )
         from mapanything.utils.image import rgb
 
         dataset = self._dataset(norm_type, tuple(image_size))

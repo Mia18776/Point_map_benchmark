@@ -161,11 +161,17 @@ def discover_scenes(root: str, stride: int = 1, limit: Optional[int] = None):
     return scenes
 
 
-def check_common_size(size: Tuple[int, int]) -> None:
-    """Raise if a user-requested shared image size is not usable by all models."""
+def check_common_size(
+    size: Tuple[int, int], patch_sizes: Sequence[int] = PATCH_SIZES
+) -> None:
+    """Raise if a user-requested shared image size is not usable by all models.
+
+    ``patch_sizes`` are those of the models actually being run; by default
+    every backbone in the benchmark, so the size suits any model selection.
+    """
     width, height = size
     for value, label in ((width, "width"), (height, "height")):
-        for patch in PATCH_SIZES:
+        for patch in sorted(set(patch_sizes)):
             if value % patch != 0:
                 raise ValueError(
                     f"Image {label} {value} is not divisible by patch size {patch}. "
