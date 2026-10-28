@@ -58,7 +58,13 @@ from pointmap_bench.models import (  # noqa: E402
     run_model,
 )
 from pointmap_bench.report import write_reports  # noqa: E402
-from pointmap_bench.sources import FolderViewSource  # noqa: E402
+from pointmap_bench.sources import (  # noqa: E402
+    FolderViewSource,
+    WaiViewSource,
+    wai_dataset_factory,
+    wai_dataset_spec,
+    wai_native_resolution,
+)
 
 
 def parse_image_size(value: str):
@@ -69,14 +75,16 @@ def parse_image_size(value: str):
         raise argparse.ArgumentTypeError(
             f"Expected WIDTHxHEIGHT (e.g. 448x336), got '{value}'"
         ) from exc
-    try:
-        check_common_size((width, height))
-    except ValueError as exc:
-        # argparse replaces a bare ValueError from a type= callable with its
-        # own generic "invalid value" text, throwing away the explanation of
-        # which patch size the number is not divisible by.
-        raise argparse.ArgumentTypeError(str(exc)) from exc
+    if width <= 0 or height <= 0:
+        raise argparse.ArgumentTypeError(f"Image size must be positive, got '{value}'")
+    # Divisibility depends on which models run, so main() checks it once
+    # --models is known (see check_image_size_for_models).
     return width, height
+
+
+def check_image_size_for_models(image_size, model_keys) -> None:
+    """Raise ValueError if ``image_size`` is not a grid every selected model accepts."""
+    check_common_size(image_size, [MODEL_REGISTRY[key].patch_size for key in model_keys])
 
 
 def positive_int(value: str) -> int:
@@ -104,8 +112,27 @@ def build_parser() -> argparse.ArgumentParser:
         "--scenes-root",
         help="Folder containing one sub-folder per scene (each may hold a gt.npz)",
     )
+    source.add_argument(
+        "--wai-dataset",
+        help=(
+            "Evaluate on a map-anything WAI test dataset (eth3d, scannetpp, "
+            "tav2_wb, ...: any configs/dataset/<name>_wai/test in map-anything), "
+            "with views sampled by its covisibility random walk"
+        ),
+    )
     parser.add_argument(
         "--gt", help="Ground-truth .npz for --images (see README for the format)"
+    )
+    parser.add_argument("--wai-root", help="Folder holding the WAI scenes")
+    parser.add_argument(
+        "--wai-metadata-dir",
+        help="Folder holding test/<dataset>_scene_list_test.npy",
+    )
+    parser.add_argument(
+        "--wai-num-views", type=positive_int, default=8, help="Views per WAI set"
+    )
+    parser.add_argument(
+        "--wai-scenes", nargs="+", help="Only evaluate these WAI scenes (default: all)"
     )
     parser.add_argument(
         "--models",
@@ -122,8 +149,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--image-size",
         type=parse_image_size,
         help=(
-            "Force every model onto the same WIDTHxHEIGHT grid (multiple of 112, "
-            "e.g. 448x336). Required for ground-truth evaluation."
+            "Force every model onto the same WIDTHxHEIGHT grid, divisible by the "
+            "patch size of every selected model (a multiple of 112, e.g. 448x336, "
+            "fits all; 518x392 fits the patch-14 ones). Required for "
+            "ground-truth evaluation."
         ),
     )
     parser.add_argument(
@@ -209,6 +238,8 @@ def run_configuration(args) -> dict:
         ),
         "stride": args.stride,
         "max_views": args.max_views,
+        "wai_dataset": args.wai_dataset,
+        "wai_num_views": args.wai_num_views if args.wai_dataset else None,
         "confidence_percentile": args.confidence_percentile,
         "max_pairs": args.max_pairs,
         "mapanything_mask": not args.no_mapanything_mask,
@@ -225,16 +256,8 @@ def print_model_availability(device: str) -> None:
         print(f"{key:<20} {status:<10} {reason or spec.notes}")
 
 
-def main() -> int:
-    args = build_parser().parse_args()
-
-    if args.list_models:
-        print_model_availability(args.device)
-        return 0
-
-    if not args.images and not args.scenes_root:
-        build_parser().error("one of --images or --scenes-root is required")
-
+def build_folder_sources(args):
+    """``(name, source, provenance)`` for each scene of an image folder."""
     if args.images:
         scenes = [
             Scene(
@@ -246,9 +269,111 @@ def main() -> int:
         ]
     else:
         scenes = discover_scenes(args.scenes_root, args.stride, args.max_views)
+    return [(scene.name, FolderViewSource(scene), scene.provenance()) for scene in scenes]
 
-    has_gt = any(scene.gt_path for scene in scenes)
-    if has_gt and args.image_size is None:
+
+def build_wai_sources(args):
+    """``(name, source, provenance)`` for one multi-view set per WAI scene.
+
+    Set ``i`` is scene ``i`` of the natsorted test split, sampled with seed
+    ``seed + i`` - the first pass of upstream's ``N @ dataset`` evaluation.
+    """
+    import functools
+
+    missing = [
+        flag
+        for flag, value in (
+            ("--wai-root", args.wai_root),
+            ("--wai-metadata-dir", args.wai_metadata_dir),
+        )
+        if not value
+    ]
+    if missing:
+        raise SystemExit(f"--wai-dataset also needs {' '.join(missing)}")
+
+    try:
+        spec = wai_dataset_spec(args.wai_dataset)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    # Without --image-size every model runs at the resolution upstream
+    # benchmarks it at for this dataset; resolve them all now so a missing
+    # config fails before any model is loaded.
+    native = {}
+    if args.image_size is None:
+        for long_side in sorted({MODEL_REGISTRY[key].resolution_set for key in args.models}):
+            try:
+                native[long_side] = wai_native_resolution(args.wai_dataset, long_side)
+            except ValueError as exc:
+                raise SystemExit(str(exc)) from exc
+        print(
+            "Native resolutions: "
+            + ", ".join(f"{side} -> {w}x{h}" for side, (w, h) in native.items())
+        )
+
+    # One dataset per (normalisation, resolution), shared by every scene.
+    factory = functools.lru_cache(maxsize=None)(
+        wai_dataset_factory(spec, args.wai_root, args.wai_metadata_dir)
+    )
+    listing_size = args.image_size or next(iter(native.values()))
+    all_scenes = [
+        str(s) for s in factory("dinov2", listing_size, args.wai_num_views).scenes
+    ]
+    unknown = set(args.wai_scenes or []) - set(all_scenes)
+    if unknown:
+        raise SystemExit(f"Unknown {args.wai_dataset} scenes: {sorted(unknown)}")
+
+    seed = spec.kwargs.get("seed")
+    sources = []
+    for index, name in enumerate(all_scenes):
+        if args.wai_scenes and name not in args.wai_scenes:
+            continue
+        source = WaiViewSource(
+            factory,
+            index=index,
+            num_views=args.wai_num_views,
+            name=name,
+            dataset_name=args.wai_dataset,
+            seed=seed,
+            native_resolution=native.__getitem__,
+        )
+        provenance = {
+            "num_views": args.wai_num_views,
+            "sampling/strategy": "covisibility_random_walk",
+            "sampling/dataset": args.wai_dataset,
+            "sampling/set_index": index,
+            "sampling/seed": seed,
+            "sampling/config": spec.config_path,
+        }
+        sources.append((name, source, provenance))
+    return sources
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+
+    if args.list_models:
+        print_model_availability(args.device)
+        return 0
+
+    if not (args.images or args.scenes_root or args.wai_dataset):
+        build_parser().error("one of --images, --scenes-root or --wai-dataset is required")
+    if args.image_size is not None:
+        try:
+            check_image_size_for_models(args.image_size, args.models)
+        except ValueError as exc:
+            build_parser().error(str(exc))
+
+    if args.wai_dataset:
+        sources = build_wai_sources(args)
+    else:
+        sources = build_folder_sources(args)
+
+    has_gt = args.wai_dataset is not None or any(
+        isinstance(source, FolderViewSource) and source.scene.gt_path
+        for _, source, _ in sources
+    )
+    if has_gt and args.image_size is None and not args.wai_dataset:
         print(
             "[warn] Ground truth was found but --image-size is not set. Each model "
             "will run at its own native resolution; the GT is resized to match each "
@@ -257,7 +382,8 @@ def main() -> int:
             file=sys.stderr,
         )
 
-    print(f"Scenes: {[f'{s.name} ({s.num_views} views)' for s in scenes]}")
+    summary = [f"{name} ({provenance['num_views']} views)" for name, _, provenance in sources]
+    print(f"Scenes: {summary}")
     print(f"Models: {args.models}")
     print(f"Device: {args.device}")
 
@@ -270,12 +396,12 @@ def main() -> int:
             records.extend(
                 {
                     "model": model_key,
-                    "scene": scene.name,
+                    "scene": name,
                     "status": "skipped",
                     "reason": reason,
-                    **scene.provenance(),
+                    **provenance,
                 }
-                for scene in scenes
+                for name, _, provenance in sources
             )
             continue
 
@@ -290,26 +416,26 @@ def main() -> int:
             records.extend(
                 {
                     "model": model_key,
-                    "scene": scene.name,
+                    "scene": name,
                     "status": "load_error",
                     "reason": message,
-                    **scene.provenance(),
+                    **provenance,
                 }
-                for scene in scenes
+                for name, _, provenance in sources
             )
             continue
 
-        for scene in scenes:
+        for name, source, provenance in sources:
             record = {
                 "model": model_key,
-                "scene": scene.name,
+                "scene": name,
                 "status": "ok",
-                **scene.provenance(),
+                **provenance,
             }
             try:
                 # The sample is built for *this* model's normalisation and
                 # grid; the source decides which views that means.
-                prepared = FolderViewSource(scene).prepare(
+                prepared = source.prepare(
                     norm_type=norm_type,
                     patch_size=spec.patch_size,
                     resolution_set=spec.resolution_set,
@@ -345,7 +471,7 @@ def main() -> int:
                 # Exports are side artefacts. A failure here (full disk, a
                 # long path, trimesh raising) must not discard an inference
                 # that already produced a full set of metrics.
-                scene_dir = os.path.join(args.output_dir, scene.name)
+                scene_dir = os.path.join(args.output_dir, name)
                 try:
                     if args.export_ply:
                         record["exported_points"] = export_point_cloud(
@@ -361,19 +487,19 @@ def main() -> int:
                         )
                 except Exception as exc:  # noqa: BLE001 - recorded, not fatal
                     record["export_error"] = f"{type(exc).__name__}: {exc}"
-                    print(f"  [warn] {scene.name}: export failed: {exc}")
+                    print(f"  [warn] {name}: export failed: {exc}")
 
                 print(
-                    f"  {scene.name}: {record.get('inference_seconds', float('nan')):.2f}s"
+                    f"  {name}: {record.get('inference_seconds', float('nan')):.2f}s"
                     f"  valid={record.get('cloud/valid_ratio', float('nan')):.3f}"
                     f"  consistency@1.03={record.get('consistency/inlier_1.03', float('nan')):.3f}"
                 )
             except ModelUnavailable as exc:
                 record.update(status="skipped", reason=str(exc))
-                print(f"  [skip] {scene.name}: {exc}")
+                print(f"  [skip] {name}: {exc}")
             except Exception as exc:  # noqa: BLE001 - reported, not swallowed
                 record.update(status="error", reason=f"{type(exc).__name__}: {exc}")
-                print(f"  [error] {scene.name}: {exc}")
+                print(f"  [error] {name}: {exc}")
                 traceback.print_exc()
                 if args.fail_fast:
                     raise

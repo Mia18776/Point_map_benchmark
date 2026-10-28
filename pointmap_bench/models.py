@@ -21,6 +21,8 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import os
+import shutil
+import tempfile
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -361,6 +363,32 @@ def _measure(device: str):
         stats["seconds"] = time.perf_counter() - start
 
 
+@contextlib.contextmanager
+def _fresh_cache_dir(model: Any):
+    """Give a model with an on-disk ``cache_dir`` a new, empty one for one call.
+
+    MASt3R's sparse global alignment caches pairwise network outputs under
+    ``cache_dir`` keyed only by the image paths it is handed (scene label +
+    view name), not by resolution or pixel content. A shared cache therefore
+    replays results from an earlier run on the same views - at a different
+    resolution that crashes on a reshape, at the same one it silently skips
+    inference and makes the timing meaningless. Each call gets its own
+    directory, removed afterwards.
+    """
+    parent = getattr(model, "cache_dir", None)
+    if parent is None:
+        yield
+        return
+    os.makedirs(parent, exist_ok=True)
+    fresh = tempfile.mkdtemp(prefix="run_", dir=parent)
+    model.cache_dir = fresh
+    try:
+        yield
+    finally:
+        model.cache_dir = parent
+        shutil.rmtree(fresh, ignore_errors=True)
+
+
 def run_model(
     spec: ModelSpec,
     prepared: PreparedViews,
@@ -422,7 +450,8 @@ def run_model(
             else:
                 # MASt3R re-enables grad internally for its global alignment;
                 # torch.enable_grad() inside this block takes precedence.
-                outputs = model(views)
+                with _fresh_cache_dir(model):
+                    outputs = model(views)
 
     info["inference_seconds"] = run_stats["seconds"]
     info["seconds_per_view"] = run_stats["seconds"] / max(prepared.num_views, 1)

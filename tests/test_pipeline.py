@@ -97,6 +97,8 @@ def test_common_size_validation():
     check_common_size((448, 336))  # 448 = 32*14 = 28*16, 336 = 24*14 = 21*16
     with pytest.raises(ValueError, match="divisible by patch size"):
         check_common_size((518, 392))
+    # Without a patch-16 model (MASt3R) in the run, 518 is a valid width.
+    check_common_size((518, 392), patch_sizes=(14,))
 
 
 def test_load_views_respects_the_requested_grid(synthetic_scene):
@@ -539,7 +541,7 @@ def test_wai_source_refuses_to_guess_a_resolution():
     from pointmap_bench.sources import WaiViewSource
 
     source = WaiViewSource(lambda *a: _StubWaiDataset(*a), index=0, num_views=2)
-    with pytest.raises(ValueError, match="image-size"):
+    with pytest.raises(ValueError, match="image_size"):
         source.prepare(norm_type="dinov2", patch_size=14)
 
 
@@ -601,15 +603,42 @@ def test_cli_rejects_nonsense_sampling_arguments():
     """
     import argparse
 
-    from run_benchmark import parse_image_size, positive_int
+    from run_benchmark import check_image_size_for_models, parse_image_size, positive_int
 
     for bad in ("0", "-1"):
         with pytest.raises(argparse.ArgumentTypeError, match="1 or greater"):
             positive_int(bad)
     assert positive_int("3") == 3
 
-    # The explanation of *why* a size is rejected must survive argparse, which
-    # replaces a bare ValueError with its own generic message.
-    with pytest.raises(argparse.ArgumentTypeError, match="divisible by patch size"):
-        parse_image_size("672x504")
+    with pytest.raises(argparse.ArgumentTypeError, match="WIDTHxHEIGHT"):
+        parse_image_size("448")
     assert parse_image_size("448x336") == (448, 336)
+
+    # Divisibility is checked against the models actually selected: 504 is
+    # fine for patch-14 backbones but not for MASt3R's patch 16.
+    check_image_size_for_models((672, 504), ["mapanything", "pi3"])
+    with pytest.raises(ValueError, match="divisible by patch size 16"):
+        check_image_size_for_models((672, 504), ["mapanything", "mast3r"])
+
+
+def test_mast3r_cache_is_fresh_per_call_and_cleaned_up(tmp_path):
+    """Sparse GA keys its cache by image path only; a shared cache replays an
+    earlier run's network outputs (and crashed when the resolution changed)."""
+    from pointmap_bench.models import _fresh_cache_dir
+
+    class Model:
+        cache_dir = str(tmp_path / "cache")
+
+    model = Model()
+    seen = []
+    for _ in range(2):
+        with _fresh_cache_dir(model):
+            seen.append(model.cache_dir)
+            (tmp_path / "cache" / os.path.basename(model.cache_dir) / "forward").mkdir()
+    assert seen[0] != seen[1]
+    assert all(os.path.dirname(d) == str(tmp_path / "cache") for d in seen)
+    assert model.cache_dir == str(tmp_path / "cache")
+    assert os.listdir(tmp_path / "cache") == []
+
+    with _fresh_cache_dir(object()):  # models without a cache are untouched
+        pass
