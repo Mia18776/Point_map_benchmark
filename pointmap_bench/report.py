@@ -71,6 +71,7 @@ NON_METRIC_FIELDS = frozenset(
         "display_name",
         "views",
         "views_digest",
+        "amp",
         "resolution",
         "norm_type",
         "device",

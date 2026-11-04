@@ -764,3 +764,51 @@ def test_merge_combines_per_model_runs_and_refuses_incomparable_ones(tmp_path):
     )
     with pytest.raises(SystemExit, match="more than one run"):
         merge_results.merge([a, duplicate])
+
+
+def test_amp_bf16_wraps_only_the_wrapper_models_in_autocast(monkeypatch):
+    """--amp bf16 must put a wrapper model (MASt3R) under bf16 autocast, and
+    the default must leave it at upstream's precision (no outer autocast)."""
+    import contextlib
+
+    import torch
+
+    from pointmap_bench import models
+    from pointmap_bench.sources import PreparedViews
+
+    entered = []
+
+    @contextlib.contextmanager
+    def fake_autocast(device_type, dtype=None):
+        entered.append((device_type, dtype))
+        yield
+
+    monkeypatch.setattr(models.torch, "autocast", fake_autocast)
+    monkeypatch.setattr(models, "check_availability", lambda spec, device: None)
+    monkeypatch.setattr(models, "prediction_from_wrapper_output", lambda outputs, **kw: kw["info"])
+    monkeypatch.setattr(models.torch.cuda, "is_available", lambda: False)
+
+    class Model(torch.nn.Module):
+        def forward(self, views):
+            return []
+
+    prepared = PreparedViews(
+        views=[{"img": torch.zeros(1, 3, 2, 2), "data_norm_type": ["dust3r"]}],
+        images=np.zeros((1, 2, 2, 3), dtype=np.float32),
+        resolution=(2, 2),
+        norm_type="dust3r",
+        scene_name="s",
+        view_names=["v0"],
+    )
+    spec = models.MODEL_REGISTRY["mast3r"]
+
+    # Device "cuda" is only a string here; the stub views stay on the CPU.
+    monkeypatch.setattr(torch.Tensor, "to", lambda self, *a, **k: self)
+    info = models.run_model(spec, prepared, Model(), device="cuda")
+    assert entered == [] and info["amp"] == "upstream"
+
+    info = models.run_model(spec, prepared, Model(), device="cuda", amp="bf16")
+    assert entered == [("cuda", torch.bfloat16)] and info["amp"] == "bf16"
+
+    with pytest.raises(ValueError, match="amp"):
+        models.run_model(spec, prepared, Model(), device="cuda", amp="fp8")

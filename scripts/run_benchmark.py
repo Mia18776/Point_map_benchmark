@@ -50,6 +50,7 @@ from pointmap_bench.export import (  # noqa: E402
 )
 from pointmap_bench.metrics import evaluate_with_gt, evaluate_without_gt  # noqa: E402
 from pointmap_bench.models import (  # noqa: E402
+    AMP_MODES,
     DEFAULT_MODELS,
     MODEL_REGISTRY,
     ModelUnavailable,
@@ -193,6 +194,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--export-glb", action="store_true")
     parser.add_argument("--export-npz", action="store_true")
     parser.add_argument(
+        "--amp",
+        choices=AMP_MODES,
+        default="upstream",
+        help=(
+            "Inference precision. 'upstream' (default): each model at the precision "
+            "upstream's benchmark uses - bf16, except MASt3R in fp32. 'bf16': bf16 "
+            "autocast for every model, which in practice switches MASt3R to bf16"
+        ),
+    )
+    parser.add_argument(
         "--no-mapanything-mask",
         action="store_true",
         help="Disable MapAnything's edge/ambiguity masking (keeps raw dense output)",
@@ -258,6 +269,7 @@ def run_configuration(args) -> dict:
         "confidence_percentile": args.confidence_percentile,
         "max_pairs": args.max_pairs,
         "mapanything_mask": not args.no_mapanything_mask,
+        "amp": args.amp,
     }
 
 
@@ -490,6 +502,7 @@ def main() -> int:
                     model=model,
                     device=args.device,
                     mapanything_apply_mask=not args.no_mapanything_mask,
+                    amp=args.amp,
                 )
                 prediction = prediction.filter_by_confidence(
                     args.confidence_percentile
@@ -563,6 +576,10 @@ def main() -> int:
         )
     if args.no_mapanything_mask:
         notes.append("MapAnything's edge/ambiguity masking was disabled.")
+    if args.amp != "upstream":
+        notes.append(
+            f"Every model ran under {args.amp} autocast, not upstream's per-model precision."
+        )
 
     paths = write_reports(
         records, args.output_dir, extra_notes=notes, config=run_configuration(args)

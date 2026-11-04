@@ -164,6 +164,10 @@ MODEL_REGISTRY: Dict[str, ModelSpec] = {
 
 DEFAULT_MODELS = ("mapanything", "mast3r", "pi3", "da3")
 
+# Inference precision: "upstream" = each model at upstream's benchmark
+# precision; "bf16" = bf16 autocast around every wrapper (see run_model).
+AMP_MODES = ("upstream", "bf16")
+
 
 class ModelUnavailable(RuntimeError):
     """Raised when a model cannot run in the current environment."""
@@ -404,6 +408,7 @@ def run_model(
     device: str = "cuda",
     mapanything_apply_mask: bool = True,
     mapanything_minibatch_size: Optional[int] = 1,
+    amp: str = "upstream",
 ) -> Prediction:
     """Run one already-loaded model on one already-prepared multi-view sample.
 
@@ -420,6 +425,12 @@ def run_model(
         mapanything_apply_mask: Pass through to ``MapAnything.infer``; keeps the
             model's recommended edge/ambiguity masking.
         mapanything_minibatch_size: Memory-efficient inference minibatch size.
+        amp: ``"upstream"`` runs each model at the precision upstream's
+            benchmark uses for it: bf16 for every model except MASt3R, which
+            upstream runs in fp32 (``amp=0`` in its ``mast3r.sh``). ``"bf16"``
+            also wraps the wrapper call in bf16 autocast, as upstream's
+            ``amp=1`` would - which only changes MASt3R, because the other
+            wrappers and ``MapAnything.infer`` already run in bf16.
 
     Returns:
         A :class:`~pointmap_bench.prediction.Prediction`.
@@ -442,7 +453,16 @@ def run_model(
         "device": device,
     }
 
+    if amp not in AMP_MODES:
+        raise ValueError(f"amp must be one of {AMP_MODES}, got {amp!r}")
+    info["amp"] = amp
+
     is_mapanything = spec.loader == "hf"
+    autocast = (
+        torch.autocast("cuda", dtype=torch.bfloat16)
+        if amp == "bf16" and not is_mapanything and device.startswith("cuda")
+        else contextlib.nullcontext()
+    )
     with torch.no_grad():
         with _measure(device) as run_stats:
             if is_mapanything:
@@ -458,7 +478,7 @@ def run_model(
             else:
                 # MASt3R re-enables grad internally for its global alignment;
                 # torch.enable_grad() inside this block takes precedence.
-                with _fresh_cache_dir(model):
+                with _fresh_cache_dir(model), autocast:
                     outputs = model(views)
 
     info["inference_seconds"] = run_stats["seconds"]
