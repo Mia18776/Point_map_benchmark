@@ -165,7 +165,7 @@ MODEL_REGISTRY: Dict[str, ModelSpec] = {
 DEFAULT_MODELS = ("mapanything", "mast3r", "pi3", "da3")
 
 # Inference precision: "upstream" = each model at upstream's benchmark
-# precision; "bf16" = bf16 autocast around every wrapper (see run_model).
+# precision; "bf16" = also MASt3R's backbone in bf16 (see run_model).
 AMP_MODES = ("upstream", "bf16")
 
 
@@ -401,6 +401,41 @@ def _fresh_cache_dir(model: Any):
         shutil.rmtree(fresh, ignore_errors=True)
 
 
+@contextlib.contextmanager
+def _bf16_backbone(model: Any):
+    """Run MASt3R's transformer backbone in bf16, everything after it in fp32.
+
+    MASt3R's ``symmetric_inference`` is written for this: it calls
+    ``_encode_image_pairs`` and ``_decoder``, then switches autocast off and
+    casts the tokens to fp32 for the heads. What is *not* bf16-safe is what
+    sparse global alignment does next - its reciprocal matcher writes a bf16
+    distance into an fp32 buffer and raises - so an autocast around the whole
+    wrapper fails every set. This wraps only those two backbone calls, on the
+    instance, for one call.
+    """
+    net = getattr(model, "model", None)
+    names = ("_encode_image_pairs", "_decoder")
+    if net is None or not all(hasattr(net, name) for name in names):
+        raise ValueError(
+            f"{type(model).__name__} has no MASt3R backbone ({', '.join(names)}) to run in bf16"
+        )
+
+    def in_bf16(fn):
+        def wrapped(*args, **kwargs):
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                return fn(*args, **kwargs)
+
+        return wrapped
+
+    for name in names:
+        setattr(net, name, in_bf16(getattr(net, name)))
+    try:
+        yield
+    finally:
+        for name in names:
+            delattr(net, name)
+
+
 def run_model(
     spec: ModelSpec,
     prepared: PreparedViews,
@@ -428,9 +463,9 @@ def run_model(
         amp: ``"upstream"`` runs each model at the precision upstream's
             benchmark uses for it: bf16 for every model except MASt3R, which
             upstream runs in fp32 (``amp=0`` in its ``mast3r.sh``). ``"bf16"``
-            also wraps the wrapper call in bf16 autocast, as upstream's
-            ``amp=1`` would - which only changes MASt3R, because the other
-            wrappers and ``MapAnything.infer`` already run in bf16.
+            runs MASt3R's transformer backbone in bf16 too, with matching and
+            global alignment kept in fp32 (see :func:`_bf16_backbone`); the
+            other models already run in bf16 and are unchanged.
 
     Returns:
         A :class:`~pointmap_bench.prediction.Prediction`.
@@ -458,9 +493,11 @@ def run_model(
     info["amp"] = amp
 
     is_mapanything = spec.loader == "hf"
+    # The other wrappers and MapAnything.infer already run in bf16, so only
+    # MASt3R has anything to switch - and only its backbone (_bf16_backbone).
     autocast = (
-        torch.autocast("cuda", dtype=torch.bfloat16)
-        if amp == "bf16" and not is_mapanything and device.startswith("cuda")
+        _bf16_backbone(model)
+        if amp == "bf16" and spec.key == "mast3r" and device.startswith("cuda")
         else contextlib.nullcontext()
     )
     with torch.no_grad():

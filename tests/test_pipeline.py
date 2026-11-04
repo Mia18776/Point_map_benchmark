@@ -766,9 +766,13 @@ def test_merge_combines_per_model_runs_and_refuses_incomparable_ones(tmp_path):
         merge_results.merge([a, duplicate])
 
 
-def test_amp_bf16_wraps_only_the_wrapper_models_in_autocast(monkeypatch):
-    """--amp bf16 must put a wrapper model (MASt3R) under bf16 autocast, and
-    the default must leave it at upstream's precision (no outer autocast)."""
+def test_amp_bf16_runs_only_the_mast3r_backbone_in_bf16(monkeypatch):
+    """--amp bf16 must put MASt3R's encoder and decoder - and nothing after
+    them - under bf16 autocast, and the default must leave MASt3R in fp32.
+
+    An autocast around the whole wrapper made sparse alignment's matcher
+    write bf16 into an fp32 buffer and fail every set.
+    """
     import contextlib
 
     import torch
@@ -776,20 +780,38 @@ def test_amp_bf16_wraps_only_the_wrapper_models_in_autocast(monkeypatch):
     from pointmap_bench import models
     from pointmap_bench.sources import PreparedViews
 
-    entered = []
+    depth = []  # autocast nesting depth, as seen by each stage
 
     @contextlib.contextmanager
     def fake_autocast(device_type, dtype=None):
-        entered.append((device_type, dtype))
-        yield
+        assert (device_type, dtype) == ("cuda", torch.bfloat16)
+        depth.append(1)
+        try:
+            yield
+        finally:
+            depth.pop()
 
     monkeypatch.setattr(models.torch, "autocast", fake_autocast)
     monkeypatch.setattr(models, "check_availability", lambda spec, device: None)
     monkeypatch.setattr(models, "prediction_from_wrapper_output", lambda outputs, **kw: kw["info"])
     monkeypatch.setattr(models.torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(torch.Tensor, "to", lambda self, *a, **k: self)
 
-    class Model(torch.nn.Module):
+    class Net:
+        def _encode_image_pairs(self):
+            return len(depth)
+
+        def _decoder(self):
+            return len(depth)
+
+    class Wrapper(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.model = Net()
+
         def forward(self, views):
+            # backbone, then matching/alignment
+            self.seen = (self.model._encode_image_pairs(), self.model._decoder(), len(depth))
             return []
 
     prepared = PreparedViews(
@@ -800,15 +822,21 @@ def test_amp_bf16_wraps_only_the_wrapper_models_in_autocast(monkeypatch):
         scene_name="s",
         view_names=["v0"],
     )
-    spec = models.MODEL_REGISTRY["mast3r"]
+    mast3r = models.MODEL_REGISTRY["mast3r"]
 
-    # Device "cuda" is only a string here; the stub views stay on the CPU.
-    monkeypatch.setattr(torch.Tensor, "to", lambda self, *a, **k: self)
-    info = models.run_model(spec, prepared, Model(), device="cuda")
-    assert entered == [] and info["amp"] == "upstream"
+    model = Wrapper()
+    info = models.run_model(mast3r, prepared, model, device="cuda")
+    assert model.seen == (0, 0, 0) and info["amp"] == "upstream"
 
-    info = models.run_model(spec, prepared, Model(), device="cuda", amp="bf16")
-    assert entered == [("cuda", torch.bfloat16)] and info["amp"] == "bf16"
+    info = models.run_model(mast3r, prepared, model, device="cuda", amp="bf16")
+    assert model.seen == (1, 1, 0) and info["amp"] == "bf16"
+    # The backbone methods are the class's own again afterwards.
+    assert "_decoder" not in vars(model.model)
+
+    # Models that already run in bf16 are left alone.
+    other = Wrapper()
+    models.run_model(models.MODEL_REGISTRY["pi3"], prepared, other, device="cuda", amp="bf16")
+    assert other.seen == (0, 0, 0)
 
     with pytest.raises(ValueError, match="amp"):
-        models.run_model(spec, prepared, Model(), device="cuda", amp="fp8")
+        models.run_model(mast3r, prepared, model, device="cuda", amp="fp8")

@@ -199,8 +199,8 @@ def build_parser() -> argparse.ArgumentParser:
         default="upstream",
         help=(
             "Inference precision. 'upstream' (default): each model at the precision "
-            "upstream's benchmark uses - bf16, except MASt3R in fp32. 'bf16': bf16 "
-            "autocast for every model, which in practice switches MASt3R to bf16"
+            "upstream's benchmark uses - bf16, except MASt3R in fp32. 'bf16': MASt3R's "
+            "transformer backbone in bf16 as well (matching and alignment stay fp32)"
         ),
     )
     parser.add_argument(
@@ -578,7 +578,8 @@ def main() -> int:
         notes.append("MapAnything's edge/ambiguity masking was disabled.")
     if args.amp != "upstream":
         notes.append(
-            f"Every model ran under {args.amp} autocast, not upstream's per-model precision."
+            "MASt3R's backbone ran in bf16 (matching and alignment in fp32), not at "
+            "upstream's fp32."
         )
 
     paths = write_reports(
