@@ -721,3 +721,46 @@ def test_mast3r_cache_is_fresh_per_call_and_cleaned_up(tmp_path):
 
     with _fresh_cache_dir(object()):  # models without a cache are untouched
         pass
+
+
+def _write_run(path, config, records):
+    path.mkdir()
+    (path / "results.json").write_text(json.dumps({"config": config, "records": records}))
+    return str(path)
+
+
+def test_merge_combines_per_model_runs_and_refuses_incomparable_ones(tmp_path):
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
+    import merge_results
+
+    base = {"code_revision": "abc", "image_size": "native", "wai_dataset": "eth3d"}
+    a = _write_run(
+        tmp_path / "a",
+        {**base, "models": ["pi3"], "timestamp": "1"},
+        [{"model": "pi3", "scene": "s0", "status": "ok", "pose/auc_5": 50.0}],
+    )
+    b = _write_run(
+        tmp_path / "b",
+        {**base, "models": ["da3"], "timestamp": "2"},
+        [{"model": "da3", "scene": "s0", "status": "ok", "pose/auc_5": 70.0}],
+    )
+    records, config = merge_results.merge([a, b])
+    assert [r["model"] for r in records] == ["pi3", "da3"]
+    assert config["models"] == ["pi3", "da3"]
+    assert config["code_revision"] == "abc"
+
+    other_code = _write_run(
+        tmp_path / "c",
+        {**base, "code_revision": "def", "models": ["vggt"]},
+        [{"model": "vggt", "scene": "s0", "status": "ok"}],
+    )
+    with pytest.raises(SystemExit, match="code_revision"):
+        merge_results.merge([a, other_code])
+
+    duplicate = _write_run(
+        tmp_path / "d",
+        {**base, "models": ["pi3"]},
+        [{"model": "pi3", "scene": "s0", "status": "ok"}],
+    )
+    with pytest.raises(SystemExit, match="more than one run"):
+        merge_results.merge([a, duplicate])
