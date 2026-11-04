@@ -387,6 +387,85 @@ def test_official_metrics_degrade_when_the_prediction_is_wrong(synthetic_scene):
     assert 0.1 < rays["rays/err_deg"] < 5.0
 
 
+def test_ray_error_scores_the_predicted_rays_not_their_pinhole_fit(synthetic_scene):
+    """Upstream's ray_dirs_err_deg compares the rays the model predicted.
+
+    A distortion a pinhole cannot express disappears from rays rebuilt out of
+    the fitted intrinsics, so scoring those would report a perfect camera for
+    a model that got the camera wrong.
+    """
+    import torch
+    from mapanything.utils.geometry import get_rays_in_camera_frame
+
+    from pointmap_bench.official_metrics import ray_direction_error_deg
+
+    intrinsics = synthetic_scene["intrinsics"]
+    _, rays = get_rays_in_camera_frame(
+        torch.as_tensor(intrinsics), HEIGHT, WIDTH, normalize_to_unit_sphere=True
+    )
+    rays = rays.numpy()
+
+    exact = ray_direction_error_deg(
+        intrinsics, intrinsics, HEIGHT, WIDTH, pred_ray_directions=rays
+    )
+    assert exact["rays/err_deg"] == pytest.approx(0.0, abs=1e-6)
+
+    # Radial distortion: the predicted rays are wrong, the intrinsics are not.
+    distorted = rays.copy()
+    radius_sq = (distorted[..., 0] ** 2 + distorted[..., 1] ** 2)[..., None]
+    distorted[..., :2] *= 1.0 + 0.3 * radius_sq
+    scored = ray_direction_error_deg(
+        intrinsics, intrinsics, HEIGHT, WIDTH, pred_ray_directions=distorted
+    )
+    assert scored["rays/err_deg"] > 0.1
+
+
+def test_wrapper_and_mapanything_predictions_keep_their_rays():
+    """Both conversion paths must carry the predicted rays to the metric."""
+    import torch
+
+    from pointmap_bench.prediction import prediction_from_wrapper_output
+
+    num_views, height, width = 2, 28, 28
+    outputs = []
+    for _ in range(num_views):
+        points = torch.rand(1, height, width, 3) + torch.tensor([0.0, 0.0, 4.0])
+        outputs.append(
+            {
+                "pts3d": points,
+                "pts3d_cam": points,
+                "ray_directions": torch.nn.functional.normalize(points, dim=-1),
+                "cam_quats": torch.tensor([[0.0, 0.0, 0.0, 1.0]]),
+                "cam_trans": torch.zeros(1, 3),
+            }
+        )
+    prediction = prediction_from_wrapper_output(
+        outputs,
+        images=np.zeros((num_views, height, width, 3), dtype=np.float32),
+        is_metric=False,
+    )
+    assert prediction.ray_directions.shape == (num_views, height, width, 3)
+    assert prediction.filter_by_confidence(0.0).ray_directions is prediction.ray_directions
+
+
+def test_report_warns_when_models_saw_different_views(tmp_path):
+    base = {"scene": "s0", "status": "ok", "cam0/rel_ae": 0.1}
+    same = [
+        {**base, "model": "a", "views_digest": "aaa"},
+        {**base, "model": "b", "views_digest": "aaa"},
+    ]
+    report = open(write_reports(same, str(tmp_path))["markdown"], encoding="utf-8").read()
+    assert "different views" not in report
+
+    differ = [
+        {**base, "model": "a", "views_digest": "aaa"},
+        {**base, "model": "b", "views_digest": "bbb"},
+    ]
+    report = open(write_reports(differ, str(tmp_path))["markdown"], encoding="utf-8").read()
+    assert "different views" in report
+    assert "`bbb` (b)" in report
+
+
 def test_gt_evaluation_includes_the_official_columns(synthetic_scene):
     """evaluate_with_gt must surface the upstream metrics alongside its own."""
     from pointmap_bench.geometry import depth_to_camera_points, depth_to_world_points

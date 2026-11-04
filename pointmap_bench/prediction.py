@@ -28,6 +28,11 @@ class Prediction:
         mask: (V, H, W) boolean validity mask.
         images: (V, H, W, 3) un-normalised RGB in [0, 1], for colouring exports.
         confidence: Optional (V, H, W) per-pixel confidence.
+        ray_directions: Optional (V, H, W, 3) unit ray directions in each
+            camera frame, exactly as the model predicted them. ``intrinsics``
+            is a pinhole fit to these, so scoring the camera from the fit
+            would grade the fit rather than the model; upstream's
+            ``ray_dirs_err_deg`` uses the predicted rays themselves.
         is_metric: Whether the model claims real-world (metric) scale.
         info: Free-form diagnostics (runtime, memory, model id, ...).
     """
@@ -40,6 +45,7 @@ class Prediction:
     mask: np.ndarray
     images: np.ndarray
     confidence: Optional[np.ndarray] = None
+    ray_directions: Optional[np.ndarray] = None
     is_metric: bool = False
     info: Dict[str, Any] = field(default_factory=dict)
 
@@ -63,6 +69,13 @@ class Prediction:
             width,
         ):
             raise ValueError(f"confidence has shape {self.confidence.shape}")
+        if self.ray_directions is not None and self.ray_directions.shape != (
+            num_views,
+            height,
+            width,
+            3,
+        ):
+            raise ValueError(f"ray_directions has shape {self.ray_directions.shape}")
         self.mask = self.mask.astype(bool)
 
     @property
@@ -91,6 +104,7 @@ class Prediction:
             mask=new_mask,
             images=self.images,
             confidence=self.confidence,
+            ray_directions=self.ray_directions,
             is_metric=self.is_metric,
             info=dict(self.info),
         )
@@ -140,9 +154,13 @@ def prediction_from_wrapper_output(
     from .geometry import pose_from_quat_trans
 
     points_world, points_cam, intrinsics, quats, trans, confidences = [], [], [], [], [], []
+    ray_directions = []
     for view in outputs:
         points_world.append(_to_numpy(view["pts3d"][batch_index]))
         points_cam.append(_to_numpy(view["pts3d_cam"][batch_index]))
+
+        if "ray_directions" in view:
+            ray_directions.append(_to_numpy(view["ray_directions"][batch_index]))
 
         if "intrinsics" in view:
             intrinsics.append(_to_numpy(view["intrinsics"][batch_index]))
@@ -180,6 +198,9 @@ def prediction_from_wrapper_output(
         points_cam=points_cam,
         depth_z=depth_z,
         intrinsics=np.stack(intrinsics),
+        ray_directions=(
+            np.stack(ray_directions) if len(ray_directions) == len(outputs) else None
+        ),
         poses_c2w=poses_c2w,
         mask=mask,
         images=images,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Benchmark MapAnything, MASt3R, Pi3 and Depth Anything 3 on 3D point-map generation.
+"""Benchmark feed-forward 3D point-map models (MapAnything, MASt3R, Pi3, DA3, VGGT, ...).
 
 Examples
 --------
@@ -151,8 +151,9 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Force every model onto the same WIDTHxHEIGHT grid, divisible by the "
             "patch size of every selected model (a multiple of 112, e.g. 448x336, "
-            "fits all; 518x392 fits the patch-14 ones). Required for "
-            "ground-truth evaluation."
+            "fits all; 518x392 fits the patch-14 ones). Recommended for "
+            "ground-truth evaluation on an image folder; on a WAI dataset each "
+            "model otherwise runs at upstream's benchmark resolution."
         ),
     )
     parser.add_argument(

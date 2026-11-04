@@ -1,6 +1,6 @@
 """Model registry and runners.
 
-Every model is driven through MapAnything's unified interface, so the four
+Every model is driven through MapAnything's unified interface, so the
 models really do receive identical inputs and are converted from identical
 output conventions:
 
@@ -331,6 +331,13 @@ def _prediction_from_mapanything(outputs, images, spec: ModelSpec, info) -> Pred
         if "conf" in outputs[0]
         else None
     )
+    # infer() keeps the raw predicted rays next to the pinhole intrinsics it
+    # fits to them; the ray error is scored on the rays, as upstream does.
+    ray_directions = (
+        np.stack([_to_numpy(o["ray_directions"][0]) for o in outputs])
+        if all("ray_directions" in o for o in outputs)
+        else None
+    )
     return Prediction(
         points_world=points_world,
         points_cam=points_cam,
@@ -340,6 +347,7 @@ def _prediction_from_mapanything(outputs, images, spec: ModelSpec, info) -> Pred
         mask=mask,
         images=images,
         confidence=confidence,
+        ray_directions=ray_directions,
         is_metric=spec.is_metric,
         info=info,
     )

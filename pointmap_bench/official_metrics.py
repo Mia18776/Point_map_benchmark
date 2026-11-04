@@ -28,7 +28,7 @@ disagree on purpose; both are reported.
 
 from __future__ import annotations
 
-from typing import Dict, Sequence
+from typing import Dict, Optional, Sequence
 
 import numpy as np
 
@@ -100,19 +100,29 @@ def ray_direction_error_deg(
     gt_intrinsics: np.ndarray,
     height: int,
     width: int,
+    pred_ray_directions: Optional[np.ndarray] = None,
 ) -> Dict[str, float]:
     """Angular error between predicted and GT unit ray directions, in degrees.
 
-    This is upstream's ``ray_dirs_err_deg``: build the unit ray of every pixel
-    from each set of intrinsics, take the L2 distance between them, and convert
-    it to an angle. It is the cleanest read on whether a model recovered the
-    camera's field of view, independent of any depth it predicted.
+    This is upstream's ``ray_dirs_err_deg``: the L2 distance between the
+    predicted and the GT unit ray of every pixel, converted to an angle. It is
+    the cleanest read on whether a model recovered the camera's field of view,
+    independent of any depth it predicted.
+
+    Upstream scores the rays the model *predicted* (``preds[i]["ray_directions"]``
+    in ``benchmarking/dense_n_view/benchmark.py``), not rays rebuilt from a
+    pinhole fit to them; the fit discards whatever the model got wrong that a
+    pinhole cannot express, which lowers the error. So ``pred_ray_directions``
+    is used whenever the model provides it, and ``pred_intrinsics`` only as a
+    fallback for one that does not.
 
     Args:
         pred_intrinsics: (V, 3, 3) predicted pinhole intrinsics.
         gt_intrinsics: (V, 3, 3) GT pinhole intrinsics on the same grid.
         height: Image height in pixels.
         width: Image width in pixels.
+        pred_ray_directions: Optional (V, H, W, 3) predicted ray directions in
+            each camera frame; normalised here.
     """
     from mapanything.utils.geometry import get_rays_in_camera_frame
     from mapanything.utils.metrics import (
@@ -127,9 +137,18 @@ def ray_direction_error_deg(
             f"Intrinsics shapes differ: {tuple(pred.shape)} vs {tuple(gt.shape)}"
         )
 
-    _, pred_rays = get_rays_in_camera_frame(
-        pred, height, width, normalize_to_unit_sphere=True
-    )
+    if pred_ray_directions is not None:
+        pred_rays = torch.as_tensor(np.asarray(pred_ray_directions, dtype=np.float64))
+        expected = (gt.shape[0], height, width, 3)
+        if tuple(pred_rays.shape) != expected:
+            raise ValueError(
+                f"Ray directions have shape {tuple(pred_rays.shape)}, expected {expected}"
+            )
+        pred_rays = torch.nn.functional.normalize(pred_rays, dim=-1)
+    else:
+        _, pred_rays = get_rays_in_camera_frame(
+            pred, height, width, normalize_to_unit_sphere=True
+        )
     _, gt_rays = get_rays_in_camera_frame(
         gt, height, width, normalize_to_unit_sphere=True
     )
@@ -158,6 +177,12 @@ def evaluate_official(
     out.update(pose_auc(prediction.poses_c2w, gt_poses_c2w))
     height, width = prediction.depth_z.shape[1], prediction.depth_z.shape[2]
     out.update(
-        ray_direction_error_deg(prediction.intrinsics, gt_intrinsics, height, width)
+        ray_direction_error_deg(
+            prediction.intrinsics,
+            gt_intrinsics,
+            height,
+            width,
+            pred_ray_directions=getattr(prediction, "ray_directions", None),
+        )
     )
     return out

@@ -251,8 +251,10 @@ def evaluate_pointmaps_sim3(
     * *Completeness* is measured against the **full** GT cloud (``gt_valid``),
       not just the pixels the model chose to predict. Restricting it to the
       intersection would mean a model that masks most of the image can never be
-      penalised for the geometry it left out. Accuracy stays on the
-      intersection, which is what accuracy means.
+      penalised for the geometry it left out. Accuracy is still queried from
+      the intersection - the points the model predicted - but searched
+      against that same full GT cloud, so its reference does not depend on
+      how much the model masked.
 
     Args:
         pred_points: (V, H, W, 3) predicted world-frame points.
@@ -318,9 +320,13 @@ def evaluate_pointmaps_sim3(
         out["sim3/mae_lsq_rel_extent"] = _safe(lsq_err.mean() / gt_extent)
         out["sim3/median_ae_lsq_rel_extent"] = _safe(np.median(lsq_err) / gt_extent)
 
-    # Accuracy is prediction -> GT over the matched pixels; completeness is
-    # GT -> prediction over *every* GT point, so unpredicted geometry counts.
-    accuracy = chamfer_metrics(pred_aligned, gt_matched, chamfer_max_points, seed)
+    # Accuracy is prediction -> GT, queried from the matched pixels;
+    # completeness is GT -> prediction over *every* GT point, so unpredicted
+    # geometry counts. Both search the same, model-independent GT cloud: if
+    # accuracy searched only the GT at the pixels a model predicted, a model
+    # that masks more would get a sparser reference, hence larger
+    # nearest-neighbour distances on identical per-point quality.
+    accuracy = chamfer_metrics(pred_aligned, gt_reference, chamfer_max_points, seed)
     completeness = chamfer_metrics(pred_aligned, gt_reference, chamfer_max_points, seed)
     chamfer = {
         "accuracy_mean": accuracy["accuracy_mean"],

@@ -33,6 +33,7 @@ from pointmap_bench.geometry import (  # noqa: E402
 )
 from pointmap_bench.metrics import (  # noqa: E402
     chamfer_metrics,
+    evaluate_pointmaps_sim3,
     evaluate_poses,
     evaluate_with_gt,
     evaluate_without_gt,
@@ -438,3 +439,28 @@ def test_rel_extent_normaliser_does_not_depend_on_the_model_mask(scene):
 
     assert half_result["gt/covered_ratio"] < 0.6
     assert normaliser(half_result) == pytest.approx(normaliser(full_result), rel=1e-9)
+
+
+def test_sim3_accuracy_does_not_depend_on_how_much_a_model_masked():
+    """Masking pixels must not make the remaining points score worse.
+
+    Accuracy is searched against the full GT cloud. When it searched only the
+    GT at the pixels a model predicted, the same noisy points scored ~6% worse
+    once every other row was masked, just because the reference was sparser.
+    """
+    rng = np.random.default_rng(0)
+    views, height, width = 2, 60, 80
+    u, v = np.meshgrid(np.linspace(0, 4, width), np.linspace(0, 3, height))
+    gt = np.stack([np.stack([u, v, np.full_like(u, 5.0 + i)], -1) for i in range(views)])
+    pred = gt + rng.normal(0, 0.02, gt.shape)
+    full = np.ones((views, height, width), dtype=bool)
+    rows = full.copy()
+    rows[:, ::2] = False
+
+    dense = evaluate_pointmaps_sim3(pred, gt, full, gt_valid=full)
+    masked = evaluate_pointmaps_sim3(pred, gt, rows, gt_valid=full)
+    # Same per-point quality, so the masked run may only differ by which
+    # points it averages over - not by a systematic penalty.
+    assert masked["sim3/accuracy_median"] == pytest.approx(
+        dense["sim3/accuracy_median"], rel=0.02
+    )

@@ -180,6 +180,34 @@ def _scene_coverage_warning(records: Sequence[dict]) -> Optional[str]:
     )
 
 
+def _views_mismatch_warning(records: Sequence[dict]) -> Optional[str]:
+    """Warn when two models were given different views of the same scene.
+
+    The views table shows one digest per scene, taken from whichever record
+    came first. Every model is meant to see the same views, but each one gets
+    its own sample - built for its normalisation and grid - so nothing else
+    would reveal it if a sampler ever drew differently for one of them.
+    """
+    digests: Dict[str, Dict[str, set]] = {}
+    for record in records:
+        if record.get("status") != "ok" or "views_digest" not in record:
+            continue
+        per_scene = digests.setdefault(record.get("scene"), {})
+        per_scene.setdefault(record["views_digest"], set()).add(record["model"])
+    differing = {scene: d for scene, d in digests.items() if len(d) > 1}
+    if not differing:
+        return None
+    detail = "; ".join(
+        f"{scene}: "
+        + ", ".join(f"`{digest}` ({' '.join(sorted(models))})" for digest, models in sorted(d.items()))
+        for scene, d in sorted(differing.items())
+    )
+    return (
+        "Not comparable as-is: models were given different views of the same "
+        f"scene - {detail}."
+    )
+
+
 def _format(value: Optional[float]) -> str:
     if value is None:
         return "-"
@@ -329,6 +357,9 @@ def write_reports(
     mismatch = _scene_coverage_warning(records)
     if mismatch:
         sections.append(f"> **{mismatch}**\n")
+    views_mismatch = _views_mismatch_warning(records)
+    if views_mismatch:
+        sections.append(f"> **{views_mismatch}**\n")
 
     sections.extend(_configuration_table(config))
     sections.extend(_views_table(records))

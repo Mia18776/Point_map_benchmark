@@ -76,7 +76,7 @@ re-derived here, so they can be read directly against the numbers in its
 | metric | meaning |
 | --- | --- |
 | `pose/auc_5`, `pose/auc_30` | AUC of the per-pair relative-pose error (`max(rotation, translation)`) up to 5° / 30°, as a percentage — upstream's `pose_auc_5` |
-| `rays/err_deg` | angular error between predicted and GT unit ray directions, i.e. how wrong the recovered intrinsics are — upstream's `ray_dirs_err_deg` |
+| `rays/err_deg` | angular error between the model's predicted unit ray directions and the GT ones, i.e. how wrong its camera model is — upstream's `ray_dirs_err_deg`. Scored on the predicted rays themselves, not on rays rebuilt from the pinhole intrinsics fitted to them |
 
 They live in `pointmap_bench/official_metrics.py`, the one module that needs
 torch and `mapanything`; everything else stays NumPy-only. If those imports are
@@ -205,8 +205,14 @@ and how it performs best. But then the models do not share a pixel grid.
 
 `--image-size` forces a shared grid. It must be divisible by both patch sizes
 in play (14 and 16), i.e. a multiple of **112** — for example `448x336`,
-`560x448` or `672x448`. For ground-truth comparisons, use it: it makes the GT
-depth resampling identical for every model.
+`560x448` or `672x448`. For ground-truth comparisons on an image folder, use
+it: it makes the GT depth resampling identical for every model.
+
+On a WAI dataset (`--wai-dataset`) it is optional. Without it each model runs
+at the resolution upstream's own benchmark configs give it for that dataset
+(`configs/dataset/benchmark_<518|512>_*.yaml`, e.g. ETH3D at 518x336 for the
+ViT/14 models and 512x336 for MASt3R), and the dataset crops images and GT
+together, so every model is still scored on its own exact grid.
 
 ### Useful flags
 
@@ -236,16 +242,17 @@ published one. A folder read in filename order cannot do that, however correct
 the metrics downstream are.
 
 It takes a `dataset_factory(norm_type, resolution, num_views)` because a WAI
-dataset fixes its normalisation at construction while the models here need
-three different ones; one dataset is built per normalisation and cached. It
-also requires an explicit `--image-size`, since there is no per-model native
-mapping to fall back on.
+dataset fixes its normalisation and resolution at construction while the
+models here need different ones; one dataset is built per (normalisation,
+resolution) and cached. The constructor arguments (seed, covisibility
+threshold, ...) are read from map-anything's
+`configs/dataset/<name>_wai/test/default.yaml`, not copied here.
 
-> **Status.** `WaiViewSource` is implemented and unit-tested against a stub
-> dataset, but is **not yet wired to the CLI** — that needs the WAI
-> benchmarking data on disk (see map-anything's
-> `data_processing/download_and_extract_benchmarking_data.py`). The CLI
-> currently always uses `FolderViewSource`.
+Use it from the CLI with `--wai-dataset eth3d --wai-root ... --wai-metadata-dir ...`.
+`scripts/prepare_wai_subset.py` downloads only the frames the sampler will
+pick, instead of the full benchmarking zips. Every record carries the view
+digest, and the report warns if two models were given different views of the
+same scene.
 
 ## Data layout
 
