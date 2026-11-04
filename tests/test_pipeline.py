@@ -852,3 +852,45 @@ def test_mapanything_mask_is_off_by_default_like_upstream():
     assert parse(["--images", "x"]).mapanything_mask is False
     assert parse(["--images", "x", "--mapanything-mask"]).mapanything_mask is True
     assert parse(["--images", "x", "--no-mapanything-mask"]).mapanything_mask is False
+
+
+def test_each_record_is_on_disk_before_the_run_ends(tmp_path):
+    """A job killed half way must leave every set it finished."""
+    from pointmap_bench.report import RecordLog, load_partial_run
+
+    log = RecordLog(str(tmp_path), {"code_revision": "abc", "models": ["pi3"]})
+    log.add({"model": "pi3", "scene": "s0", "status": "ok", "pose/auc_5": 50.0})
+    # Read back while the log is still open, as after a kill.
+    config, records = load_partial_run(str(tmp_path))
+    assert config["code_revision"] == "abc"
+    assert records == [{"model": "pi3", "scene": "s0", "status": "ok", "pose/auc_5": 50.0}]
+
+    log.add({"model": "pi3", "scene": "s1", "status": "ok", "pose/auc_5": 70.0})
+    # A kill mid-write leaves a cut-off last line; it is skipped, not fatal.
+    with open(tmp_path / "records.jsonl", "a", encoding="utf-8") as fh:
+        fh.write('{"model": "pi3", "scene": "s2", "sta')
+    _, records = load_partial_run(str(tmp_path))
+    assert [r["scene"] for r in records] == ["s0", "s1"]
+
+
+def test_merge_reports_on_a_run_that_never_finished(tmp_path):
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
+    import merge_results
+
+    from pointmap_bench.report import RecordLog
+
+    base = {"code_revision": "abc", "image_size": "native", "wai_dataset": "eth3d"}
+    killed = tmp_path / "killed"
+    log = RecordLog(str(killed), {**base, "models": ["mast3r"], "timestamp": "1"})
+    log.add({"model": "mast3r", "scene": "s0", "status": "ok", "pose/auc_5": 80.0})
+    finished = _write_run(
+        tmp_path / "done",
+        {**base, "models": ["pi3"], "timestamp": "2"},
+        [{"model": "pi3", "scene": "s0", "status": "ok", "pose/auc_5": 60.0}],
+    )
+    records, config = merge_results.merge([finished, str(killed)])
+    assert sorted(r["model"] for r in records) == ["mast3r", "pi3"]
+    assert config["incomplete_runs"] == [os.path.abspath(killed)]
+
+    with pytest.raises(SystemExit, match="neither"):
+        merge_results.merge([str(tmp_path / "empty")])

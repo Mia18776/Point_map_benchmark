@@ -58,7 +58,7 @@ from pointmap_bench.models import (  # noqa: E402
     load_model,
     run_model,
 )
-from pointmap_bench.report import write_reports  # noqa: E402
+from pointmap_bench.report import RecordLog, write_reports  # noqa: E402
 from pointmap_bench.sources import (  # noqa: E402
     FolderViewSource,
     WaiViewSource,
@@ -446,22 +446,25 @@ def main() -> int:
     print(f"Models: {args.models}")
     print(f"Device: {args.device}")
 
-    records = []
+    # Every record is on disk as soon as it exists (records.jsonl), so a job
+    # killed before the end still leaves all the sets it finished.
+    config = run_configuration(args)
+    log = RecordLog(args.output_dir, config)
     for model_key in args.models:
         spec = MODEL_REGISTRY[model_key]
         reason = check_availability(spec, args.device)
         if reason:
             print(f"[skip] {model_key}: {reason}")
-            records.extend(
-                {
-                    "model": model_key,
-                    "scene": name,
-                    "status": "skipped",
-                    "reason": reason,
-                    **provenance,
-                }
-                for name, _, provenance in sources
-            )
+            for name, _, provenance in sources:
+                log.add(
+                    {
+                        "model": model_key,
+                        "scene": name,
+                        "status": "skipped",
+                        "reason": reason,
+                        **provenance,
+                    }
+                )
             continue
 
         print(f"\n=== {spec.display_name} ===")
@@ -472,16 +475,16 @@ def main() -> int:
             print(f"[error] failed to load {model_key}: {message}")
             if args.fail_fast:
                 raise
-            records.extend(
-                {
-                    "model": model_key,
-                    "scene": name,
-                    "status": "load_error",
-                    "reason": message,
-                    **provenance,
-                }
-                for name, _, provenance in sources
-            )
+            for name, _, provenance in sources:
+                log.add(
+                    {
+                        "model": model_key,
+                        "scene": name,
+                        "status": "load_error",
+                        "reason": message,
+                        **provenance,
+                    }
+                )
             continue
 
         for name, source, provenance in sources:
@@ -563,7 +566,7 @@ def main() -> int:
                 traceback.print_exc()
                 if args.fail_fast:
                     raise
-            records.append(record)
+            log.add(record)
 
         del model
         if args.device.startswith("cuda"):
@@ -591,9 +594,9 @@ def main() -> int:
             "upstream's fp32."
         )
 
-    paths = write_reports(
-        records, args.output_dir, extra_notes=notes, config=run_configuration(args)
-    )
+    log.close()
+    records = log.records
+    paths = write_reports(records, args.output_dir, extra_notes=notes, config=config)
     print("\nWrote:")
     for name, path in paths.items():
         print(f"  {name}: {path}")

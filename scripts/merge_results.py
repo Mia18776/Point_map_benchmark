@@ -5,6 +5,10 @@ A full WAI evaluation is easiest to run as one job per model, in parallel.
 This puts their ``results.json`` back together into a single ``report.md`` /
 ``results.csv`` / ``results.json``, exactly as if one run had produced them.
 
+A run that was killed before the end has no results.json; its per-set log
+(records.jsonl + run_config.json) is used instead, so the sets it finished
+still count. Passing a single such run reports on it alone.
+
 Runs are only merged when they can be compared: every setting that changes
 the numbers (code revision, dataset, image size, sets, thresholds, ...) must
 agree, and no (model, scene) may appear twice. ``models`` and ``timestamp``
@@ -22,7 +26,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from pointmap_bench.report import write_reports  # noqa: E402
+from pointmap_bench.report import RECORDS_LOG, load_partial_run, write_reports  # noqa: E402
 
 # Settings that may legitimately differ between the runs being merged.
 PER_RUN_SETTINGS = ("models", "timestamp")
@@ -30,12 +34,22 @@ PER_RUN_SETTINGS = ("models", "timestamp")
 
 def merge(run_dirs):
     """Return ``(records, config, notes)`` for the given run directories."""
-    records, configs = [], []
+    records, configs, partial = [], [], []
     for run_dir in run_dirs:
-        with open(os.path.join(run_dir, "results.json"), encoding="utf-8") as fh:
-            data = json.load(fh)
-        configs.append((run_dir, data.get("config", {})))
-        records.extend(data["records"])
+        results = os.path.join(run_dir, "results.json")
+        if os.path.exists(results):
+            with open(results, encoding="utf-8") as fh:
+                data = json.load(fh)
+            configs.append((run_dir, data.get("config", {})))
+            records.extend(data["records"])
+        elif os.path.exists(os.path.join(run_dir, RECORDS_LOG)):
+            # A run that never reached the end: use what it saved per set.
+            config, run_records = load_partial_run(run_dir)
+            configs.append((run_dir, config))
+            records.extend(run_records)
+            partial.append(run_dir)
+        else:
+            raise SystemExit(f"{run_dir} has neither results.json nor {RECORDS_LOG}")
 
     reference_dir, reference = configs[0]
     for run_dir, config in configs[1:]:
@@ -65,6 +79,8 @@ def merge(run_dirs):
     config["models"] = models
     config["timestamp"] = max(str(c.get("timestamp", "")) for _, c in configs)
     config["merged_from"] = [os.path.abspath(d) for d in run_dirs]
+    if partial:
+        config["incomplete_runs"] = [os.path.abspath(d) for d in partial]
     return records, config
 
 
@@ -78,6 +94,11 @@ def main() -> int:
     notes = [
         f"Merged from {len(args.runs)} runs with identical settings; see merged_from.",
     ]
+    if config.get("incomplete_runs"):
+        notes.append(
+            "Some runs stopped before the end and contribute only the sets they "
+            "finished (see incomplete_runs); check num_scenes per model."
+        )
     if config.get("image_size") == "native":
         notes.append(
             "Each model ran at its own native resolution; compare runtimes with that in mind."

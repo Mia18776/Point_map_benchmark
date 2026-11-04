@@ -301,6 +301,64 @@ def _views_table(records: Sequence[dict]) -> List[str]:
     return lines
 
 
+RECORDS_LOG = "records.jsonl"
+CONFIG_FILE = "run_config.json"
+
+
+class RecordLog:
+    """Keeps the records of a run and saves each one the moment it exists.
+
+    ``write_reports`` only runs once every model and scene is done, so a job
+    killed half way - a wall-time limit, a node failure - used to leave
+    nothing behind, however many sets it had finished. Each record is now
+    appended to ``records.jsonl`` (one JSON object per line) and flushed to
+    disk as soon as it is added, next to ``run_config.json`` written at the
+    start; :func:`load_partial_run` turns the two back into records, and
+    ``scripts/merge_results.py`` reports on such a run like a finished one.
+    """
+
+    def __init__(self, output_dir: str, config: Optional[dict] = None):
+        os.makedirs(output_dir, exist_ok=True)
+        self.records: List[dict] = []
+        with open(os.path.join(output_dir, CONFIG_FILE), "w", encoding="utf-8") as fh:
+            json.dump(dict(config or {}), fh, indent=2, sort_keys=True, default=str)
+        # A fresh run starts a fresh log, as write_reports overwrites too.
+        self._fh = open(os.path.join(output_dir, RECORDS_LOG), "w", encoding="utf-8")
+
+    def add(self, record: dict) -> None:
+        self.records.append(record)
+        self._fh.write(json.dumps(record, sort_keys=True, default=str) + "\n")
+        self._fh.flush()
+        os.fsync(self._fh.fileno())
+
+    def close(self) -> None:
+        self._fh.close()
+
+
+def load_partial_run(run_dir: str):
+    """``(config, records)`` from a run's incremental log.
+
+    A final line cut off mid-write by the kill is skipped rather than
+    failing the whole load.
+    """
+    config_path = os.path.join(run_dir, CONFIG_FILE)
+    config = {}
+    if os.path.exists(config_path):
+        with open(config_path, encoding="utf-8") as fh:
+            config = json.load(fh)
+    records = []
+    with open(os.path.join(run_dir, RECORDS_LOG), encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return config, records
+
+
 def write_reports(
     records: Sequence[dict],
     output_dir: str,
