@@ -204,9 +204,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--no-mapanything-mask",
-        action="store_true",
-        help="Disable MapAnything's edge/ambiguity masking (keeps raw dense output)",
+        "--mapanything-mask",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Apply MapAnything's own edge/ambiguity mask (its infer() default), "
+            "dropping the pixels it is unsure of. Off by default: upstream's "
+            "benchmark scores every pixel, like every other model here. "
+            "--no-mapanything-mask is accepted and is the default"
+        ),
     )
     parser.add_argument(
         "--list-models",
@@ -268,7 +274,7 @@ def run_configuration(args) -> dict:
         ),
         "confidence_percentile": args.confidence_percentile,
         "max_pairs": args.max_pairs,
-        "mapanything_mask": not args.no_mapanything_mask,
+        "mapanything_mask": args.mapanything_mask,
         "amp": args.amp,
     }
 
@@ -501,7 +507,7 @@ def main() -> int:
                     prepared,
                     model=model,
                     device=args.device,
-                    mapanything_apply_mask=not args.no_mapanything_mask,
+                    mapanything_apply_mask=args.mapanything_mask,
                     amp=args.amp,
                 )
                 prediction = prediction.filter_by_confidence(
@@ -574,8 +580,11 @@ def main() -> int:
             "Each model ran at its own native resolution; compare runtimes with that "
             "in mind."
         )
-    if args.no_mapanything_mask:
-        notes.append("MapAnything's edge/ambiguity masking was disabled.")
+    if args.mapanything_mask:
+        notes.append(
+            "MapAnything's edge/ambiguity mask was applied, so it is scored on fewer "
+            "pixels than the other models - read gt/covered_ratio next to its accuracy."
+        )
     if args.amp != "upstream":
         notes.append(
             "MASt3R's backbone ran in bf16 (matching and alignment in fp32), not at "

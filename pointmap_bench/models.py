@@ -319,7 +319,7 @@ def _prediction_from_mapanything(outputs, images, spec: ModelSpec, info) -> Pred
     poses_c2w = np.stack([_to_numpy(o["camera_poses"][0]) for o in outputs])
 
     # infer() only emits "mask" when apply_mask=True - see the `if apply_mask:`
-    # block in mapanything/utils/inference.py. With --no-mapanything-mask the
+    # block in mapanything/utils/inference.py. Without --mapanything-mask the
     # key is simply absent, and reading it unconditionally made the flag the
     # README recommends for a raw-density comparison fail every scene with a
     # KeyError. Absent means "nothing was masked", so every pixel starts valid
@@ -441,7 +441,7 @@ def run_model(
     prepared: PreparedViews,
     model: Any,
     device: str = "cuda",
-    mapanything_apply_mask: bool = True,
+    mapanything_apply_mask: bool = False,
     mapanything_minibatch_size: Optional[int] = 1,
     amp: str = "upstream",
 ) -> Prediction:
@@ -457,8 +457,10 @@ def run_model(
         prepared: Views, ground truth and provenance for one scene.
         model: Loaded model, in eval mode on ``device``.
         device: Torch device string.
-        mapanything_apply_mask: Pass through to ``MapAnything.infer``; keeps the
-            model's recommended edge/ambiguity masking.
+        mapanything_apply_mask: Pass through to ``MapAnything.infer`` as
+            ``apply_mask`` and ``mask_edges``. Off by default, as in upstream's
+            benchmark, which scores every pixel; the mask also costs ~80% of
+            MapAnything's inference time, its edge test running in NumPy on CPU.
         mapanything_minibatch_size: Memory-efficient inference minibatch size.
         amp: ``"upstream"`` runs each model at the precision upstream's
             benchmark uses for it: bf16 for every model except MASt3R, which

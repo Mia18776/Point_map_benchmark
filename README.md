@@ -220,7 +220,7 @@ together, so every model is still scored on its own exact grid.
 | --- | --- |
 | `--stride N`, `--max-views N` | subsample the views of each scene |
 | `--confidence-percentile P` | drop the lowest-confidence P% of pixels before scoring |
-| `--no-mapanything-mask` | disable MapAnything's edge/ambiguity masking (raw dense output) |
+| `--mapanything-mask` | apply MapAnything's own edge/ambiguity mask (off by default, as in upstream's benchmark) |
 | `--max-pairs N` | view pairs sampled for the consistency metric (default 30) |
 | `--fail-fast` | abort on the first model error instead of recording it |
 
@@ -343,12 +343,14 @@ meaningful — use real data for real conclusions.
 * **Occlusion penalises the consistency metric.** Scenes with large
   view-dependent occlusion will show lower inlier ratios for every model; read
   `consistency/overlap_ratio` alongside it.
-* **MapAnything's masking is on by default**, matching its recommended usage.
-  This removes edge and ambiguous pixels that other models keep, which raises
-  its accuracy and lowers its `cloud/valid_ratio` and `gt/covered_ratio`. Read
-  those two columns next to every accuracy number, use `--no-mapanything-mask`
-  for a raw-density comparison, or equalise coverage across models with
-  `--confidence-percentile`.
+* **MapAnything's own mask is off by default**, as in upstream's benchmark,
+  which calls the model directly and scores every pixel - the same treatment
+  every other model gets. `--mapanything-mask` turns on what `infer()` does by
+  default: drop ambiguous and edge pixels. That raises its depth accuracy a
+  little and lowers `cloud/valid_ratio` and `gt/covered_ratio` (to ~0.92-0.95
+  on ETH3D / TartanAirV2-WB); its poses and rays are unchanged. It also costs
+  ~80% of MapAnything's inference time, because the edge test runs in NumPy on
+  the CPU, so runtimes with the mask on are not the model's own.
 * **Models that failed on some scenes are averaged over fewer scenes.** The
   report prints `num_scenes` in every table and warns at the top when the
   models did not complete the same set, because averages over different scenes

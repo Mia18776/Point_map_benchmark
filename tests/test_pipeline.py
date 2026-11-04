@@ -647,11 +647,11 @@ def _fake_mapanything_outputs(num_views, height, width, with_mask):
 
 
 def test_mapanything_without_a_mask_key_keeps_every_pixel():
-    """--no-mapanything-mask removes the 'mask' key; that must not be an error.
+    """Without --mapanything-mask (the default) infer() emits no 'mask' key;
+    that must not be an error.
 
     infer() only sets "mask" inside its `if apply_mask:` block, so reading it
-    unconditionally made the flag the README recommends for a raw-density
-    comparison fail every scene with a KeyError.
+    unconditionally made the unmasked run fail every scene with a KeyError.
     """
     from pointmap_bench.models import MODEL_REGISTRY, _prediction_from_mapanything
 
@@ -840,3 +840,15 @@ def test_amp_bf16_runs_only_the_mast3r_backbone_in_bf16(monkeypatch):
 
     with pytest.raises(ValueError, match="amp"):
         models.run_model(mast3r, prepared, model, device="cuda", amp="fp8")
+
+
+def test_mapanything_mask_is_off_by_default_like_upstream():
+    """Upstream's benchmark scores every pixel; the CLI default must match,
+    and the old --no-mapanything-mask spelling must keep working."""
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
+    import run_benchmark
+
+    parse = run_benchmark.build_parser().parse_args
+    assert parse(["--images", "x"]).mapanything_mask is False
+    assert parse(["--images", "x", "--mapanything-mask"]).mapanything_mask is True
+    assert parse(["--images", "x", "--no-mapanything-mask"]).mapanything_mask is False
