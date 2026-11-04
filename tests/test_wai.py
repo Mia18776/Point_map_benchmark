@@ -313,3 +313,122 @@ def test_wai_source_runs_each_model_at_its_native_resolution():
 
     with pytest.raises(ValueError, match="patch size 16"):
         source.prepare("dust3r", patch_size=16, resolution_set=518)  # 518 % 16 != 0
+
+
+# --------------------------------------------------------------------------
+# Several sets per scene: upstream's "N @ dataset"
+# --------------------------------------------------------------------------
+
+
+def write_set_counts(configs, name="benchmark_518_eth3d_snpp.yaml", **counts):
+    config_dir = Path(configs) / "configs" / "dataset"
+    terms = " ".join(
+        f"+ {n} @ ${{dataset.{dataset}_wai.test.dataset_str}}" for dataset, n in counts.items()
+    )
+    (config_dir / name).write_text(f'test_dataset: "{terms}"\n')
+
+
+def test_set_count_is_read_from_upstream_benchmark_configs(configs):
+    from pointmap_bench.sources import wai_benchmark_set_count
+
+    write_set_counts(configs, eth3d=130, scannetpp=300)
+    write_set_counts(configs, "benchmark_512_eth3d_snpp.yaml", eth3d=130, scannetpp=300)
+    assert wai_benchmark_set_count("eth3d", configs) == 130
+    assert wai_benchmark_set_count("scannetpp", configs) == 300
+    with pytest.raises(ValueError, match="--wai-sets-per-scene"):
+        wai_benchmark_set_count("tav2_wb", configs)
+
+    # The single-view calibration benchmark is a different protocol.
+    write_set_counts(configs, "benchmark_sv_calib_518_many_ar_eth3d.yaml", eth3d=260)
+    assert wai_benchmark_set_count("eth3d", configs) == 130
+
+    write_set_counts(configs, "benchmark_504_eth3d_snpp.yaml", eth3d=40)
+    with pytest.raises(ValueError, match="disagree"):
+        wai_benchmark_set_count("eth3d", configs)
+
+
+def test_set_plan_gives_every_scene_each_repetition_once():
+    pytest.importorskip("mapanything.datasets.base.easy_dataset")
+    from pointmap_bench.sources import wai_set_plan
+
+    plan = wai_set_plan(13, 130)
+    assert len(plan) == 130 == len(set(plan))
+    assert plan == [(scene, k) for scene in range(13) for k in range(10)]
+    assert wai_set_plan(5, 5) == [(scene, 0) for scene in range(5)]
+
+
+def test_set_plan_matches_upstream_for_a_partial_last_repetition():
+    """With N not a multiple of the scene count, upstream's epoch-0 shuffle
+    decides which scenes get the extra set; the plan must agree with it."""
+    pytest.importorskip("mapanything.datasets.base.easy_dataset")
+    from mapanything.datasets.base.easy_dataset import ResizedDataset
+
+    from pointmap_bench.sources import wai_set_plan
+
+    class Scenes:
+        def __len__(self):
+            return 5
+
+    upstream = ResizedDataset(7, Scenes())
+    upstream.set_epoch(0)
+    expected = sorted(zip(map(int, upstream._idxs_mapping), map(int, upstream._idxs_seed_offset)))
+    plan = wai_set_plan(5, 7)
+    assert plan == expected
+    assert sum(1 for _, k in plan if k == 1) == 2
+
+
+def test_wai_source_samples_with_its_seed_offset_and_restores_it():
+    pytest.importorskip("mapanything.utils.image")
+    import numpy as np
+    import torch
+
+    from pointmap_bench.sources import WaiViewSource
+
+    seen = []
+
+    class Dataset:
+        _seed_offset = 0
+
+        def _set_seed_offset(self, offset):
+            self._seed_offset = offset
+
+        def __getitem__(self, key):
+            seen.append((key, self._seed_offset))
+            return [
+                {
+                    "img": torch.zeros(3, 28, 28),
+                    "data_norm_type": "dinov2",
+                    "true_shape": np.array([28, 28]),
+                    "depthmap": np.ones((28, 28, 1), dtype=np.float32),
+                    "camera_intrinsics": np.eye(3),
+                    "camera_pose": np.eye(4),
+                    "instance": f"s{self._seed_offset}_f{i}",
+                }
+                for i in range(2)
+            ]
+
+    dataset = Dataset()
+    first = WaiViewSource(lambda *a: dataset, index=3, num_views=2, seed_offset=0)
+    fourth = WaiViewSource(lambda *a: dataset, index=3, num_views=2, seed_offset=3)
+
+    a = first.prepare("dinov2", 14, image_size=(28, 28))
+    b = fourth.prepare("dinov2", 14, image_size=(28, 28))
+    assert seen == [((3, 0), 0), ((3, 0), 3)]
+    assert dataset._seed_offset == 0
+    assert b.provenance["sampling/seed_offset"] == 3
+    assert a.provenance["views_digest"] != b.provenance["views_digest"]
+
+
+def test_sample_plan_passes_the_seed_offset_through(stub_module):
+    from pointmap_bench.sources import wai_sample_plan
+
+    dataset = make_dataset(stub_module, [0, 3])
+    offsets = []
+    dataset._seed_offset = 0
+    dataset._set_seed_offset = lambda k: (offsets.append(k), setattr(dataset, "_seed_offset", k))
+    real = dataset._getitem_fn
+    dataset._getitem_fn = lambda key: (offsets.append(("read", dataset._seed_offset)), real(key))[1]
+
+    wai_sample_plan(dataset, index=0, seed_offset=4)
+    assert ("read", 4) in offsets
+    assert dataset._seed_offset == 0

@@ -62,8 +62,10 @@ from pointmap_bench.sources import (  # noqa: E402
     FolderViewSource,
     WaiViewSource,
     wai_dataset_factory,
+    wai_benchmark_set_count,
     wai_dataset_spec,
     wai_native_resolution,
+    wai_set_plan,
 )
 
 
@@ -133,6 +135,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--wai-scenes", nargs="+", help="Only evaluate these WAI scenes (default: all)"
+    )
+    parser.add_argument(
+        "--wai-sets-per-scene",
+        type=positive_int,
+        help=(
+            "Multi-view sets to evaluate per WAI scene, each sampled with its own "
+            "seed. Default: upstream's benchmark protocol, read from its configs "
+            "(130 @ ETH3D = 10 per scene, likewise ScanNet++ and TartanAirV2-WB)"
+        ),
     )
     parser.add_argument(
         "--models",
@@ -241,6 +252,9 @@ def run_configuration(args) -> dict:
         "max_views": args.max_views,
         "wai_dataset": args.wai_dataset,
         "wai_num_views": args.wai_num_views if args.wai_dataset else None,
+        "wai_sets_per_scene": (
+            args.wai_sets_per_scene or "upstream" if args.wai_dataset else None
+        ),
         "confidence_percentile": args.confidence_percentile,
         "max_pairs": args.max_pairs,
         "mapanything_mask": not args.no_mapanything_mask,
@@ -274,10 +288,12 @@ def build_folder_sources(args):
 
 
 def build_wai_sources(args):
-    """``(name, source, provenance)`` for one multi-view set per WAI scene.
+    """``(name, source, provenance)`` for every multi-view set of a WAI dataset.
 
-    Set ``i`` is scene ``i`` of the natsorted test split, sampled with seed
-    ``seed + i`` - the first pass of upstream's ``N @ dataset`` evaluation.
+    Mirrors upstream's ``N @ dataset`` evaluation: scene ``i`` of the
+    natsorted test split, repetition ``k``, sampled with seed ``seed + k + i``
+    (see :func:`~pointmap_bench.sources.wai_set_plan`). ``N`` is read from
+    upstream's benchmark configs unless ``--wai-sets-per-scene`` overrides it.
     """
     import functools
 
@@ -312,7 +328,7 @@ def build_wai_sources(args):
             + ", ".join(f"{side} -> {w}x{h}" for side, (w, h) in native.items())
         )
 
-    # One dataset per (normalisation, resolution), shared by every scene.
+    # One dataset per (normalisation, resolution), shared by every set.
     factory = functools.lru_cache(maxsize=None)(
         wai_dataset_factory(spec, args.wai_root, args.wai_metadata_dir)
     )
@@ -324,11 +340,31 @@ def build_wai_sources(args):
     if unknown:
         raise SystemExit(f"Unknown {args.wai_dataset} scenes: {sorted(unknown)}")
 
+    if args.wai_sets_per_scene:
+        total_sets = args.wai_sets_per_scene * len(all_scenes)
+        set_count_source = "--wai-sets-per-scene"
+    else:
+        try:
+            total_sets = wai_benchmark_set_count(args.wai_dataset)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+        set_count_source = "upstream benchmark config"
+    plan = wai_set_plan(len(all_scenes), total_sets)
+    print(
+        f"WAI sets: {total_sets} @ {args.wai_dataset} over {len(all_scenes)} scenes "
+        f"({set_count_source})"
+    )
+    # A scene seen once keeps its bare name, so a one-set-per-scene run reads
+    # the same as before; repeated scenes get the repetition appended.
+    repeated = total_sets > len(all_scenes)
+
     seed = spec.kwargs.get("seed")
     sources = []
-    for index, name in enumerate(all_scenes):
-        if args.wai_scenes and name not in args.wai_scenes:
+    for index, offset in plan:
+        scene = all_scenes[index]
+        if args.wai_scenes and scene not in args.wai_scenes:
             continue
+        name = f"{scene}_set{offset}" if repeated else scene
         source = WaiViewSource(
             factory,
             index=index,
@@ -337,13 +373,17 @@ def build_wai_sources(args):
             dataset_name=args.wai_dataset,
             seed=seed,
             native_resolution=native.__getitem__,
+            seed_offset=offset,
         )
         provenance = {
+            "wai_scene": scene,
             "num_views": args.wai_num_views,
             "sampling/strategy": "covisibility_random_walk",
             "sampling/dataset": args.wai_dataset,
             "sampling/set_index": index,
             "sampling/seed": seed,
+            "sampling/seed_offset": offset,
+            "sampling/total_sets": total_sets,
             "sampling/config": spec.config_path,
         }
         sources.append((name, source, provenance))

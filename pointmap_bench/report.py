@@ -65,6 +65,7 @@ NON_METRIC_FIELDS = frozenset(
     {
         "model",
         "scene",
+        "wai_scene",
         "status",
         "reason",
         "display_name",

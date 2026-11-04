@@ -249,6 +249,17 @@ threshold, ...) are read from map-anything's
 `configs/dataset/<name>_wai/test/default.yaml`, not copied here.
 
 Use it from the CLI with `--wai-dataset eth3d --wai-root ... --wai-metadata-dir ...`.
+
+**Several sets per scene.** Which 8 views of a scene a model gets moves its
+score a lot, so upstream evaluates each scene several times with different
+seeds: its benchmark configs build the test set as `130 @ ETH3D`,
+`300 @ ScanNet++` and `50 @ TartanAirV2-WB` - 10 sets for every scene. The
+benchmark reads that count from those configs and samples set *k* of scene
+*i* with seed `seed + k + i`, using upstream's own `ResizedDataset` to lay the
+sets out, so the views match upstream's set for set. `--wai-sets-per-scene N`
+overrides the count. Each set is one row of `results.csv` (`scene` is
+`<scene>_set<k>`, `wai_scene` the scene), and `num_scenes` in the report
+counts sets.
 `scripts/prepare_wai_subset.py` downloads only the frames the sampler will
 pick, instead of the full benchmarking zips. Every record carries the view
 digest, and the report warns if two models were given different views of the

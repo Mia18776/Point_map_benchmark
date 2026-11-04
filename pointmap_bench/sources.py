@@ -28,6 +28,7 @@ dataset per normalisation through the factory it is given, and caches them.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import os
 import re
@@ -366,6 +367,94 @@ def wai_native_resolution(
     return value
 
 
+def wai_benchmark_set_count(name: str, mapanything_root: Optional[str] = None) -> int:
+    """How many multi-view sets upstream evaluates on dataset ``name``.
+
+    Upstream's benchmark configs (``configs/dataset/benchmark_*.yaml``) build
+    the test set as ``N @ <dataset>``, e.g. ``130 @ ETH3D`` - 10 sets for each
+    of its 13 scenes. Read from those configs, so the count cannot drift from
+    the one upstream's published numbers were produced with.
+    """
+    import glob
+
+    import yaml
+
+    config_dir = _wai_config_dir(mapanything_root)
+    pattern = re.compile(
+        r"(\d+)\s*@\s*\$\{dataset\." + re.escape(name) + r"_wai\.test\.dataset_str\}"
+    )
+    # Only the dense multi-view benchmarks, benchmark_<long side>_*.yaml - the
+    # same files the native resolutions come from. benchmark_sv_calib_* is
+    # upstream's single-view calibration benchmark, with its own set count.
+    counts = {}
+    for path in sorted(glob.glob(os.path.join(config_dir, "benchmark_[0-9]*_*.yaml"))):
+        with open(path) as fh:
+            cfg = yaml.safe_load(fh) or {}
+        match = pattern.search(str(cfg.get("test_dataset", "")))
+        if match:
+            counts[path] = int(match.group(1))
+    if not counts:
+        raise ValueError(
+            f"No upstream benchmark config gives a set count for '{name}' "
+            f"(looked for 'N @ ${{dataset.{name}_wai.test.dataset_str}}' in "
+            f"{config_dir}/benchmark_<long side>_*.yaml). Pass --wai-sets-per-scene."
+        )
+    if len(set(counts.values())) > 1:
+        raise ValueError(f"Upstream benchmark configs disagree on the set count: {counts}")
+    return next(iter(counts.values()))
+
+
+def wai_set_plan(num_scenes: int, total_sets: int) -> List[Tuple[int, int]]:
+    """``(scene_index, seed_offset)`` of every set in ``total_sets @ dataset``.
+
+    Upstream's ``ResizedDataset`` repeats the scene list until it has
+    ``total_sets`` entries and gives the k-th repetition seed offset k, so set
+    (scene i, repetition k) is sampled with seed ``seed + k + i``. Its own
+    ``set_epoch(0)`` - the call upstream's benchmark makes - is used here
+    rather than re-derived, so a partial last repetition picks the same
+    scenes upstream would. Sorted by scene, then offset; the order a set is
+    evaluated in does not change its score.
+    """
+    from mapanything.datasets.base.easy_dataset import ResizedDataset
+
+    if num_scenes < 1 or total_sets < 1:
+        raise ValueError(f"Need at least one scene and one set, got {num_scenes}, {total_sets}")
+
+    class _Scenes:
+        def __len__(self):
+            return num_scenes
+
+    resized = ResizedDataset(int(total_sets), _Scenes())
+    resized.set_epoch(0)
+    return sorted(
+        (int(scene), int(offset))
+        for scene, offset in zip(resized._idxs_mapping, resized._idxs_seed_offset)
+    )
+
+
+@contextlib.contextmanager
+def _seed_offset(dataset, offset: int):
+    """Sample from ``dataset`` with upstream's per-repetition seed offset.
+
+    The offset is state on the dataset, and one dataset is shared by every
+    set of a run, so it is set for exactly one read and put back after.
+    """
+    if not hasattr(dataset, "_set_seed_offset"):
+        if offset:
+            raise ValueError(
+                f"{type(dataset).__name__} has no _set_seed_offset; cannot sample "
+                f"repetition {offset} of a scene"
+            )
+        yield
+        return
+    previous = getattr(dataset, "_seed_offset", 0)
+    dataset._set_seed_offset(int(offset))
+    try:
+        yield
+    finally:
+        dataset._set_seed_offset(previous)
+
+
 def wai_dataset_factory(spec: WaiDatasetSpec, root: str, metadata_dir: str):
     """Build the ``dataset_factory`` :class:`WaiViewSource` expects.
 
@@ -395,8 +484,11 @@ class _SamplingDone(Exception):
     """Stops a WAI dataset as soon as it starts loading the first view."""
 
 
-def wai_sample_plan(dataset, index: int) -> Dict[str, Any]:
+def wai_sample_plan(dataset, index: int, seed_offset: int = 0) -> Dict[str, Any]:
     """Which frames and files ``dataset[(index, 0)]`` would read, without reading them.
+
+    ``seed_offset`` selects the repetition of the scene, as in
+    :func:`wai_set_plan`.
 
     Runs the dataset's real ``_getitem_fn`` - same seed, same RNG calls, same
     covisibility walk - but stops it at the first ``load_frame`` call. The
@@ -431,7 +523,8 @@ def wai_sample_plan(dataset, index: int) -> Dict[str, Any]:
     dataset._sample_view_indices = record_sample
     module.load_frame = stop_at_load
     try:
-        dataset._getitem_fn((index, 0))
+        with _seed_offset(dataset, seed_offset):
+            dataset._getitem_fn((index, 0))
     except _SamplingDone:
         pass
     finally:
@@ -489,6 +582,9 @@ class WaiViewSource(ViewSource):
         native_resolution: ``long_side -> (width, height)``, used when no
             shared ``image_size`` is given so each model runs at its own
             resolution (see :func:`wai_native_resolution`).
+        seed_offset: Which repetition of the scene this set is - upstream's
+            ``N @ dataset`` samples repetition k with seed ``seed + k + index``
+            (see :func:`wai_set_plan`).
     """
 
     def __init__(
@@ -500,6 +596,7 @@ class WaiViewSource(ViewSource):
         dataset_name: str = "wai",
         seed: Optional[int] = None,
         native_resolution: Optional[Callable[[int], Tuple[int, int]]] = None,
+        seed_offset: int = 0,
     ):
         self.dataset_factory = dataset_factory
         self.native_resolution = native_resolution
@@ -508,6 +605,7 @@ class WaiViewSource(ViewSource):
         self.name = name or f"{dataset_name}_{index:05d}"
         self.dataset_name = dataset_name
         self.seed = seed
+        self.seed_offset = int(seed_offset)
         self._cache: Dict[Tuple[str, Tuple[int, int]], Any] = {}
 
     def _dataset(self, norm_type: str, resolution: Tuple[int, int]):
@@ -539,7 +637,8 @@ class WaiViewSource(ViewSource):
         from mapanything.utils.image import rgb
 
         dataset = self._dataset(norm_type, tuple(image_size))
-        raw_views = dataset[(self.index, 0)]
+        with _seed_offset(dataset, self.seed_offset):
+            raw_views = dataset[(self.index, 0)]
 
         views = [_as_batched_view(view) for view in raw_views]
         images = np.stack(
@@ -569,6 +668,7 @@ class WaiViewSource(ViewSource):
             "sampling/dataset": self.dataset_name,
             "sampling/set_index": self.index,
             "sampling/seed": self.seed,
+            "sampling/seed_offset": self.seed_offset,
         }
         return PreparedViews(
             views=views,

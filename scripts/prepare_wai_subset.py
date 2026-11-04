@@ -22,6 +22,9 @@ Nothing here is specific to one dataset: any ``<name>`` with a
     python scripts/prepare_wai_subset.py --dataset eth3d \\
         --root /data/wai/eth3d --metadata-dir /data/wai_metadata \\
         --num-views 8 --image-size 448x336
+
+By default it fetches every set upstream evaluates (``N @ dataset`` in its
+benchmark configs, e.g. 10 per ETH3D scene); ``--sets-per-scene`` overrides.
 """
 
 from __future__ import annotations
@@ -37,9 +40,11 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from pointmap_bench.sources import (  # noqa: E402
+    wai_benchmark_set_count,
     wai_dataset_factory,
     wai_dataset_spec,
     wai_sample_plan,
+    wai_set_plan,
 )
 
 HF_REPO = "datasets/facebook/map-anything-benchmarking"
@@ -66,6 +71,11 @@ def main() -> int:
     parser.add_argument("--num-views", type=int, default=8)
     parser.add_argument("--image-size", default="448x336", help="WIDTHxHEIGHT")
     parser.add_argument("--scenes", nargs="*", help="Subset of scenes (default: all)")
+    parser.add_argument(
+        "--sets-per-scene",
+        type=int,
+        help="Sets per scene to fetch frames for (default: upstream's N @ dataset)",
+    )
     args = parser.parse_args()
 
     from huggingface_hub import HfFileSystem
@@ -117,33 +127,47 @@ def main() -> int:
             f"{spec.class_name} did not pick up the scene list written to {split_dir}"
         )
 
+    total_sets = (
+        args.sets_per_scene * len(all_scenes)
+        if args.sets_per_scene
+        else wai_benchmark_set_count(args.dataset)
+    )
+    plan = wai_set_plan(len(all_scenes), total_sets)
+    print(f"{total_sets} sets @ {args.dataset}")
+
     manifest = {
         "dataset": args.dataset,
         "config": spec.config_path,
         "num_views": args.num_views,
         "image_size": f"{width}x{height}",
+        "total_sets": total_sets,
         "scenes": {},
     }
-    total = 0.0
-    for index, scene in enumerate(all_scenes):
+    # Which files each scene needs, over all of its sets.
+    needed: dict = {}
+    for index, offset in plan:
+        scene = all_scenes[index]
         if args.scenes and scene not in args.scenes:
             continue
-        plan = wai_sample_plan(dataset, index)
-        manifest["scenes"][scene] = {
-            "set_index": index,
-            "views": [str(f) for f in plan["frames"]],
-            "files": plan["files"],
-        }
+        sample = wai_sample_plan(dataset, index, seed_offset=offset)
+        entry = manifest["scenes"].setdefault(scene, {"set_index": index, "sets": {}})
+        entry["sets"][str(offset)] = [str(f) for f in sample["frames"]]
+        needed.setdefault(scene, set()).update(sample["files"])
 
-        # 3. Download only those files.
+    # 3. Download only those files.
+    total = 0.0
+    for scene, files in needed.items():
+        entry = manifest["scenes"][scene]
+        entry["files"] = sorted(files)
         handle, archive = remote_zip(scene)
         with handle:
-            members = [f"{scene}/{rel}" for rel in plan["files"]]
+            members = [f"{scene}/{rel}" for rel in entry["files"]]
             size = sum(archive.getinfo(m).file_size for m in members) / 1e6
             total += size
+            frames = {f for views in entry["sets"].values() for f in views}
             print(
-                f"[{index}] {scene}: {len(set(plan['frames']))} frames, "
-                f"{len(members)} files, {size:.0f} MB"
+                f"[{entry['set_index']}] {scene}: {len(entry['sets'])} sets, "
+                f"{len(frames)} frames, {len(members)} files, {size:.0f} MB"
             )
             for member in members:
                 _extract(archive, member, args.root)
