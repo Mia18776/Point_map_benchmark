@@ -48,6 +48,9 @@ class Prediction:
     ray_directions: Optional[np.ndarray] = None
     is_metric: bool = False
     info: Dict[str, Any] = field(default_factory=dict)
+    # The model's own per-view output dicts (CPU tensors), unconverted - what
+    # upstream's benchmark computes its metrics from (official/* metrics).
+    raw_outputs: Optional[List[Dict[str, Any]]] = None
 
     def __post_init__(self) -> None:
         num_views, height, width = self.depth_z.shape
@@ -107,6 +110,7 @@ class Prediction:
             ray_directions=self.ray_directions,
             is_metric=self.is_metric,
             info=dict(self.info),
+            raw_outputs=self.raw_outputs,
         )
 
 

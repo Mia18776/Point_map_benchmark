@@ -59,6 +59,10 @@ class ModelSpec:
     install_hint: str = ""
     notes: str = ""
     extra_overrides: List[str] = field(default_factory=list)
+    # How the model takes GT intrinsics as an input, or None if it cannot:
+    # "infer" = MapAnything.infer's `intrinsics` view key; "task" = the wrapper
+    # reads `camera_intrinsics` when built with upstream's calibrated_sfm task.
+    intrinsics_input: Optional[str] = None
 
 
 MODEL_REGISTRY: Dict[str, ModelSpec] = {
@@ -71,6 +75,7 @@ MODEL_REGISTRY: Dict[str, ModelSpec] = {
         patch_size=14,
         resolution_set=518,
         is_metric=True,
+        intrinsics_input="infer",
         install_hint="pip install -e /path/to/map-anything",
         notes="CC-BY-NC 4.0 weights; run through model.infer().",
     ),
@@ -83,6 +88,7 @@ MODEL_REGISTRY: Dict[str, ModelSpec] = {
         patch_size=14,
         resolution_set=518,
         is_metric=True,
+        intrinsics_input="infer",
         install_hint="pip install -e /path/to/map-anything",
         notes="Apache-2.0 weights, trained on the permissive data subset.",
     ),
@@ -125,6 +131,7 @@ MODEL_REGISTRY: Dict[str, ModelSpec] = {
         display_name="Pi3-X",
         loader="hydra",
         hydra_config="pi3x",
+        intrinsics_input="task",
         norm_type="identity",
         patch_size=14,
         resolution_set=518,
@@ -246,7 +253,12 @@ def _compose_hydra_config(config_name: str, overrides: Sequence[str]):
     return cfg
 
 
-def load_model(spec: ModelSpec, device: str, mast3r_checkpoint_dir: Optional[str] = None):
+def load_model(
+    spec: ModelSpec,
+    device: str,
+    mast3r_checkpoint_dir: Optional[str] = None,
+    intrinsics_prior: bool = False,
+):
     """Instantiate a model on ``device`` in eval mode.
 
     Returns:
@@ -268,6 +280,12 @@ def load_model(spec: ModelSpec, device: str, mast3r_checkpoint_dir: Optional[str
     from mapanything.models import init_model
 
     overrides = ["machine=default", *spec.extra_overrides]
+    if intrinsics_prior:
+        if spec.intrinsics_input is None:
+            raise ModelUnavailable(f"{spec.display_name} cannot take GT intrinsics as input")
+        if spec.intrinsics_input == "task":
+            # Upstream's own setting for "images + intrinsics" (pi3x_csfm.sh).
+            overrides.append("model/task=calibrated_sfm")
     if spec.key == "mast3r":
         if not mast3r_checkpoint_dir:
             raise ModelUnavailable(
@@ -308,6 +326,23 @@ def _prepare_views(views, device: str, spec: ModelSpec, scene_name: str, view_na
             entry["instance"] = [os.path.basename(str(view_names[index]))]
         prepared.append(entry)
     return prepared
+
+
+def _add_intrinsics_prior(views, prepared: PreparedViews, spec: ModelSpec, device: str) -> None:
+    """Hand the GT intrinsics - on the grid the model runs at - to the model.
+
+    Images-only is the benchmark's default; this is the "calibrated" setting,
+    where the camera is known, as it often is in practice (EXIF, a calibrated
+    rig). Only models that accept intrinsics as an input qualify.
+    """
+    if spec.intrinsics_input is None:
+        raise ModelUnavailable(f"{spec.display_name} cannot take GT intrinsics as input")
+    gt = (prepared.ground_truth or {}).get("intrinsics")
+    if gt is None:
+        raise ModelUnavailable("--intrinsics-prior needs ground-truth intrinsics")
+    key = "intrinsics" if spec.intrinsics_input == "infer" else "camera_intrinsics"
+    for view, intrinsics in zip(views, gt):
+        view[key] = torch.as_tensor(np.asarray(intrinsics), dtype=torch.float32)[None].to(device)
 
 
 def _prediction_from_mapanything(outputs, images, spec: ModelSpec, info) -> Prediction:
@@ -444,6 +479,7 @@ def run_model(
     mapanything_apply_mask: bool = False,
     mapanything_minibatch_size: Optional[int] = 1,
     amp: str = "upstream",
+    intrinsics_prior: bool = False,
 ) -> Prediction:
     """Run one already-loaded model on one already-prepared multi-view sample.
 
@@ -480,6 +516,8 @@ def run_model(
         prepared.views, device, spec, prepared.scene_name, prepared.view_names
     )
     images = prepared.images
+    if intrinsics_prior:
+        _add_intrinsics_prior(views, prepared, spec, device)
 
     info: Dict[str, Any] = {
         "model": spec.key,
@@ -493,6 +531,7 @@ def run_model(
     if amp not in AMP_MODES:
         raise ValueError(f"amp must be one of {AMP_MODES}, got {amp!r}")
     info["amp"] = amp
+    info["intrinsics_prior"] = bool(intrinsics_prior)
 
     is_mapanything = spec.loader == "hf"
     # The other wrappers and MapAnything.infer already run in bf16, so only
@@ -526,7 +565,13 @@ def run_model(
         info["peak_memory_mb"] = run_stats["peak_memory_mb"]
 
     if is_mapanything:
-        return _prediction_from_mapanything(outputs, images, spec, info)
-    return prediction_from_wrapper_output(
-        outputs, images=images, is_metric=spec.is_metric, info=info
-    )
+        prediction = _prediction_from_mapanything(outputs, images, spec, info)
+    else:
+        prediction = prediction_from_wrapper_output(
+            outputs, images=images, is_metric=spec.is_metric, info=info
+        )
+    prediction.raw_outputs = [
+        {k: v.detach().float().cpu() for k, v in out.items() if torch.is_tensor(v)}
+        for out in outputs
+    ]
+    return prediction

@@ -186,3 +186,94 @@ def evaluate_official(
         )
     )
     return out
+
+
+# --------------------------------------------------------------------------
+# Every metric of upstream's dense_n_view benchmark, run by upstream's code
+# --------------------------------------------------------------------------
+
+_UPSTREAM_BENCHMARK = None
+
+
+def _upstream_benchmark_module():
+    """Import benchmarking/dense_n_view/benchmark.py from the map-anything checkout.
+
+    It is a script, not part of the installed package, but importing it only
+    defines functions (its Hydra entry point runs under ``__main__``). Its
+    ``get_all_info_for_metric_computation`` is what turns a batch and the
+    model's outputs into the normalised quantities every upstream metric is
+    computed from, so it is used as is rather than re-derived.
+    """
+    global _UPSTREAM_BENCHMARK
+    if _UPSTREAM_BENCHMARK is None:
+        import importlib.util
+        import os
+
+        from .models import mapanything_root
+
+        path = os.path.join(mapanything_root(), "benchmarking", "dense_n_view", "benchmark.py")
+        spec = importlib.util.spec_from_file_location("_mapanything_dense_n_view_benchmark", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _UPSTREAM_BENCHMARK = module
+    return _UPSTREAM_BENCHMARK
+
+
+def upstream_dense_n_view_metrics(upstream_views, raw_outputs) -> Dict[str, float]:
+    """The per-set metrics of upstream's dense_n_view benchmark, as ``official/*``.
+
+    Mirrors the body of upstream's evaluation loop for one multi-view set
+    (benchmark.py, "Compute the metrics across all views"): the same inputs,
+    the same helper functions, the same per-view mean then per-set value.
+    These are upstream's definitions, which differ from the benchmark's own
+    columns on purpose in places - e.g. ``official/z_depth_abs_rel`` scores
+    depth after the joint avg-dis normalisation of all views, where
+    ``depth/abs_rel`` first rescales by the median depth ratio; and
+    ``official/pose_ate_rmse`` is in normalised units, ``pose/ate_rmse`` in
+    the GT's metres. ``official/metric_scale_abs_rel`` is reported for every
+    model, as upstream does, but means something only for metric-scale ones.
+
+    Args:
+        upstream_views: ``PreparedViews.upstream_views`` - each view's GT as
+            upstream's DataLoader batches it.
+        raw_outputs: ``Prediction.raw_outputs`` - the model's own output dicts.
+    """
+    from mapanything.utils.metrics import evaluate_ate, m_rel_ae, thresh_inliers
+
+    # evaluate_ate's Umeyama step calls np.linalg.linalg.svd, a private alias
+    # numpy 2.x removed; it is the same function as np.linalg.svd.
+    if not hasattr(np.linalg, "linalg"):
+        np.linalg.linalg = np.linalg
+
+    batch = [dict(view) for view in upstream_views]
+    preds = [dict(out) for out in raw_outputs]
+    gt_info, pr_info, valid_masks = _upstream_benchmark_module().get_all_info_for_metric_computation(
+        batch, preds
+    )
+
+    pts_rel, pts_in, z_rel, z_in, gt_poses, pr_poses = [], [], [], [], [], []
+    for v in range(len(batch)):
+        mask = valid_masks[v][0].numpy()
+        gt_pts, pr_pts = gt_info["pts3d"][v][0].numpy(), pr_info["pts3d"][v][0].numpy()
+        gt_z, pr_z = gt_info["z_depths"][v][0].numpy(), pr_info["z_depths"][v][0].numpy()
+        pts_rel.append(m_rel_ae(gt=gt_pts, pred=pr_pts, mask=mask))
+        pts_in.append(thresh_inliers(gt=gt_pts, pred=pr_pts, mask=mask, thresh=1.03))
+        z_rel.append(m_rel_ae(gt=gt_z, pred=pr_z, mask=mask))
+        z_in.append(thresh_inliers(gt=gt_z, pred=pr_z, mask=mask, thresh=1.03))
+        gt_poses.append(gt_info["poses"][v][0])
+        pr_poses.append(pr_info["poses"][v][0])
+
+    out = {
+        "official/pointmaps_abs_rel": float(np.mean(pts_rel)),
+        "official/pointmaps_inlier_thres_103": float(np.mean(pts_in)),
+        "official/z_depth_abs_rel": float(np.mean(z_rel)),
+        "official/z_depth_inlier_thres_103": float(np.mean(z_in)),
+        "official/pose_ate_rmse": float(evaluate_ate(gt_traj=gt_poses, est_traj=pr_poses)),
+    }
+    if gt_info["metric_scale"] is not None:
+        gt_scale = gt_info["metric_scale"][0].numpy()
+        pr_scale = pr_info["metric_scale"][0].numpy()
+        out["official/metric_scale_abs_rel"] = float(
+            (np.abs(pr_scale - gt_scale) / gt_scale).item()
+        )
+    return out

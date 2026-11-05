@@ -56,6 +56,11 @@ class PreparedViews:
             pixel grid as ``views``, or None when the source has no GT.
         provenance: What this sample is and how its views were chosen; copied
             onto the result record so a score can be reproduced.
+        upstream_views: For a WAI sample, the GT fields of each view exactly as
+            map-anything's dataset produced them, batched as (1, ...) - what
+            upstream's dense_n_view benchmark hands its metric code. Lets the
+            official/* metrics run upstream's own functions on the same data.
+            Never passed to a model.
     """
 
     views: List[dict]
@@ -66,6 +71,7 @@ class PreparedViews:
     view_names: List[str]
     ground_truth: Optional[Dict[str, np.ndarray]] = None
     provenance: Dict[str, Any] = field(default_factory=dict)
+    upstream_views: Optional[List[dict]] = None
 
     @property
     def num_views(self) -> int:
@@ -180,6 +186,35 @@ def _as_batched_view(view: dict) -> dict:
     if true_shape is not None:
         tensor = torch.as_tensor(np.asarray(true_shape))
         out["true_shape"] = tensor if tensor.dim() == 2 else tensor[None]
+    return out
+
+
+# GT fields of a WAI view that upstream's dense_n_view metric code reads
+# (get_all_info_for_metric_computation), plus the intrinsics a calibrated run
+# may hand to a model.
+_UPSTREAM_GT_KEYS = (
+    "camera_pose",
+    "camera_pose_quats",
+    "camera_pose_trans",
+    "camera_intrinsics",
+    "pts3d",
+    "pts3d_cam",
+    "valid_mask",
+    "ray_directions_cam",
+)
+
+
+def _upstream_gt_view(view: dict, label: str) -> dict:
+    """One WAI view's GT, batched as (1, ...) the way upstream's DataLoader would."""
+    import torch
+
+    out = {
+        key: torch.as_tensor(np.asarray(view[key]))[None]
+        for key in _UPSTREAM_GT_KEYS
+        if key in view
+    }
+    out["is_metric_scale"] = torch.as_tensor([bool(view.get("is_metric_scale", False))])
+    out["label"] = [str(view.get("label", label))]
     return out
 
 
@@ -659,6 +694,7 @@ class WaiViewSource(ViewSource):
         }
 
         view_names = [str(v.get("instance", index)) for index, v in enumerate(raw_views)]
+        upstream_views = [_upstream_gt_view(v, self.name) for v in raw_views]
         height, width = depth.shape[1], depth.shape[2]
         provenance = {
             "num_views": len(views),
@@ -679,4 +715,5 @@ class WaiViewSource(ViewSource):
             view_names=view_names,
             ground_truth=ground_truth,
             provenance=provenance,
+            upstream_views=upstream_views,
         )

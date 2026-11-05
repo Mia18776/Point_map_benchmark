@@ -124,3 +124,24 @@ def export_npz(prediction: Prediction, path: str) -> None:
     if prediction.confidence is not None:
         payload["confidence"] = prediction.confidence.astype(np.float32)
     np.savez_compressed(path, **payload)
+
+
+def export_poses(prediction: Prediction, prepared, path: str) -> None:
+    """Save one set's cameras - predicted and GT - for analysis across models.
+
+    A few KB per set: no point maps, only what comparing models' cameras with
+    each other (and with the GT) needs. Poses are OpenCV camera-to-world.
+    """
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    gt = prepared.ground_truth or {}
+    arrays = {
+        "pred_poses_c2w": prediction.poses_c2w.astype(np.float64),
+        "pred_intrinsics": prediction.intrinsics.astype(np.float64),
+        "view_names": np.asarray([str(n) for n in prepared.view_names]),
+        "is_metric": np.asarray(bool(prediction.is_metric)),
+    }
+    if "poses_c2w" in gt:
+        arrays["gt_poses_c2w"] = np.asarray(gt["poses_c2w"], dtype=np.float64)
+    if "intrinsics" in gt:
+        arrays["gt_intrinsics"] = np.asarray(gt["intrinsics"], dtype=np.float64)
+    np.savez_compressed(path, **arrays)

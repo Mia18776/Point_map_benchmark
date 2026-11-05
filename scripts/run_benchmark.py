@@ -45,10 +45,12 @@ from pointmap_bench.data import (  # noqa: E402
 )
 from pointmap_bench.export import (  # noqa: E402
     export_glb,
+    export_poses,
     export_npz,
     export_point_cloud,
 )
 from pointmap_bench.metrics import evaluate_with_gt, evaluate_without_gt  # noqa: E402
+from pointmap_bench.official_metrics import upstream_dense_n_view_metrics  # noqa: E402
 from pointmap_bench.models import (  # noqa: E402
     AMP_MODES,
     DEFAULT_MODELS,
@@ -194,6 +196,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--export-glb", action="store_true")
     parser.add_argument("--export-npz", action="store_true")
     parser.add_argument(
+        "--intrinsics-prior",
+        action="store_true",
+        help=(
+            "Give the models the GT intrinsics as an input (the 'calibrated' setting). "
+            "Only MapAnything and Pi3-X accept them; other models are skipped. The "
+            "default is images only."
+        ),
+    )
+    parser.add_argument(
+        "--export-poses",
+        action="store_true",
+        help=(
+            "Save each set's predicted and GT camera poses and intrinsics to "
+            "<output-dir>/poses/<model>/<scene>.npz (a few KB each)"
+        ),
+    )
+    parser.add_argument(
         "--amp",
         choices=AMP_MODES,
         default="upstream",
@@ -276,6 +295,7 @@ def run_configuration(args) -> dict:
         "max_pairs": args.max_pairs,
         "mapanything_mask": args.mapanything_mask,
         "amp": args.amp,
+        "intrinsics_prior": args.intrinsics_prior,
     }
 
 
@@ -469,7 +489,10 @@ def main() -> int:
 
         print(f"\n=== {spec.display_name} ===")
         try:
-            model, norm_type = load_model(spec, args.device, args.mast3r_checkpoint_dir)
+            model, norm_type = load_model(
+                spec, args.device, args.mast3r_checkpoint_dir,
+                intrinsics_prior=args.intrinsics_prior,
+            )
         except Exception as exc:  # noqa: BLE001 - reported, not swallowed
             message = f"{type(exc).__name__}: {exc}"
             print(f"[error] failed to load {model_key}: {message}")
@@ -512,6 +535,7 @@ def main() -> int:
                     device=args.device,
                     mapanything_apply_mask=args.mapanything_mask,
                     amp=args.amp,
+                    intrinsics_prior=args.intrinsics_prior,
                 )
                 prediction = prediction.filter_by_confidence(
                     args.confidence_percentile
@@ -530,12 +554,31 @@ def main() -> int:
                             prepared.ground_truth["poses_c2w"],
                         )
                     )
+                if prepared.upstream_views and prediction.raw_outputs:
+                    # Upstream's own metric code on the same views and outputs.
+                    # A failure there must not discard the benchmark's own
+                    # metrics for this set; it is recorded instead.
+                    try:
+                        record.update(
+                            upstream_dense_n_view_metrics(
+                                prepared.upstream_views, prediction.raw_outputs
+                            )
+                        )
+                    except Exception as exc:  # noqa: BLE001 - recorded, not fatal
+                        record["official_error"] = f"{type(exc).__name__}: {exc}"
+                        print(f"  [warn] {name}: official metrics failed: {exc}")
 
                 # Exports are side artefacts. A failure here (full disk, a
                 # long path, trimesh raising) must not discard an inference
                 # that already produced a full set of metrics.
                 scene_dir = os.path.join(args.output_dir, name)
                 try:
+                    if args.export_poses:
+                        export_poses(
+                            prediction,
+                            prepared,
+                            os.path.join(args.output_dir, "poses", model_key, f"{name}.npz"),
+                        )
                     if args.export_ply:
                         record["exported_points"] = export_point_cloud(
                             prediction, os.path.join(scene_dir, f"{model_key}.ply")
@@ -587,6 +630,11 @@ def main() -> int:
         notes.append(
             "MapAnything's edge/ambiguity mask was applied, so it is scored on fewer "
             "pixels than the other models - read gt/covered_ratio next to its accuracy."
+        )
+    if args.intrinsics_prior:
+        notes.append(
+            "Calibrated setting: models were given the GT intrinsics as an input, "
+            "so rays/err_deg measures how faithfully they kept them, not estimation."
         )
     if args.amp != "upstream":
         notes.append(

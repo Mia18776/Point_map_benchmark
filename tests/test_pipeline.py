@@ -793,7 +793,10 @@ def test_amp_bf16_runs_only_the_mast3r_backbone_in_bf16(monkeypatch):
 
     monkeypatch.setattr(models.torch, "autocast", fake_autocast)
     monkeypatch.setattr(models, "check_availability", lambda spec, device: None)
-    monkeypatch.setattr(models, "prediction_from_wrapper_output", lambda outputs, **kw: kw["info"])
+    class Info(dict):
+        """The record's info, standing in for a Prediction (takes attributes)."""
+
+    monkeypatch.setattr(models, "prediction_from_wrapper_output", lambda outputs, **kw: Info(kw["info"]))
     monkeypatch.setattr(models.torch.cuda, "is_available", lambda: False)
     monkeypatch.setattr(torch.Tensor, "to", lambda self, *a, **k: self)
 
@@ -894,3 +897,105 @@ def test_merge_reports_on_a_run_that_never_finished(tmp_path):
 
     with pytest.raises(SystemExit, match="neither"):
         merge_results.merge([str(tmp_path / "empty")])
+
+
+def _upstream_set(scene, scale=1.0):
+    """Upstream-format GT views and model outputs for the synthetic scene.
+
+    The outputs are the GT itself, with every length multiplied by ``scale``
+    - a perfect reconstruction up to (or, at 1.0, including) global scale.
+    """
+    import torch
+    from mapanything.utils.geometry import get_rays_in_camera_frame, rotation_matrix_to_quaternion
+
+    depth, intrinsics, poses = scene["depth_z"], scene["intrinsics"], scene["poses_c2w"]
+    pts_cam = depth_to_camera_points(depth, intrinsics)
+    pts_world = depth_to_world_points(depth, intrinsics, poses)
+    _, rays = get_rays_in_camera_frame(torch.as_tensor(intrinsics), HEIGHT, WIDTH,
+                                       normalize_to_unit_sphere=True)
+    quats = rotation_matrix_to_quaternion(torch.as_tensor(poses[:, :3, :3]))
+    t = lambda a: torch.as_tensor(np.asarray(a), dtype=torch.float32)[None]  # noqa: E731
+    views, outputs = [], []
+    for v in range(len(depth)):
+        views.append({
+            "camera_pose": t(poses[v]), "camera_pose_quats": t(quats[v]),
+            "camera_pose_trans": t(poses[v][:3, 3]), "pts3d": t(pts_world[v]),
+            "pts3d_cam": t(pts_cam[v]), "valid_mask": torch.as_tensor(depth[v] > 0)[None],
+            "ray_directions_cam": t(rays[v]), "is_metric_scale": torch.tensor([True]),
+        })
+        outputs.append({
+            "pts3d": t(pts_world[v] * scale), "pts3d_cam": t(pts_cam[v] * scale),
+            "ray_directions": t(rays[v]), "cam_quats": t(quats[v]),
+            "cam_trans": t(poses[v][:3, 3] * scale),
+        })
+    return views, outputs
+
+
+def test_official_metrics_run_upstream_code_and_score_a_perfect_set_perfectly(synthetic_scene):
+    """official/* comes from upstream's get_all_info_for_metric_computation;
+    a perfect prediction must score perfectly there, and a global rescale
+    must change only the metric-scale error - upstream normalises it away
+    everywhere else."""
+    from pointmap_bench.official_metrics import upstream_dense_n_view_metrics
+
+    views, outputs = _upstream_set(synthetic_scene)
+    perfect = upstream_dense_n_view_metrics(views, outputs)
+    assert perfect["official/pointmaps_abs_rel"] == pytest.approx(0.0, abs=1e-5)
+    assert perfect["official/z_depth_abs_rel"] == pytest.approx(0.0, abs=1e-5)
+    assert perfect["official/pointmaps_inlier_thres_103"] == pytest.approx(1.0)
+    assert perfect["official/z_depth_inlier_thres_103"] == pytest.approx(1.0)
+    assert perfect["official/pose_ate_rmse"] == pytest.approx(0.0, abs=1e-4)
+    assert perfect["official/metric_scale_abs_rel"] == pytest.approx(0.0, abs=1e-5)
+
+    views, outputs = _upstream_set(synthetic_scene, scale=2.0)
+    doubled = upstream_dense_n_view_metrics(views, outputs)
+    assert doubled["official/pointmaps_abs_rel"] == pytest.approx(0.0, abs=1e-5)
+    assert doubled["official/pose_ate_rmse"] == pytest.approx(0.0, abs=1e-4)
+    assert doubled["official/metric_scale_abs_rel"] == pytest.approx(1.0, rel=1e-4)
+
+
+def test_intrinsics_prior_reaches_only_models_that_accept_it():
+    import torch
+
+    from pointmap_bench import models
+    from pointmap_bench.sources import PreparedViews
+
+    k = np.array([[[300.0, 0, 224], [0, 300.0, 168], [0, 0, 1]]] * 2)
+    prepared = PreparedViews(views=[], images=np.zeros((2, 2, 2, 3)), resolution=(448, 336),
+                             norm_type="dinov2", scene_name="s", view_names=["a", "b"],
+                             ground_truth={"intrinsics": k})
+
+    views = [{}, {}]
+    models._add_intrinsics_prior(views, prepared, models.MODEL_REGISTRY["mapanything"], "cpu")
+    assert set(views[0]) == {"intrinsics"} and torch.allclose(views[1]["intrinsics"][0], torch.as_tensor(k[1]).float())
+
+    views = [{}, {}]
+    models._add_intrinsics_prior(views, prepared, models.MODEL_REGISTRY["pi3x"], "cpu")
+    assert set(views[0]) == {"camera_intrinsics"}
+
+    for key in ("pi3", "vggt", "da3", "mast3r"):
+        with pytest.raises(models.ModelUnavailable, match="intrinsics"):
+            models._add_intrinsics_prior([{}, {}], prepared, models.MODEL_REGISTRY[key], "cpu")
+
+
+def test_export_poses_saves_predicted_and_gt_cameras(tmp_path, synthetic_scene):
+    from pointmap_bench.export import export_poses
+    from pointmap_bench.sources import PreparedViews
+
+    depth, intrinsics, poses = (synthetic_scene[k] for k in ("depth_z", "intrinsics", "poses_c2w"))
+    prediction = Prediction(
+        points_world=depth_to_world_points(depth, intrinsics, poses),
+        points_cam=depth_to_camera_points(depth, intrinsics), depth_z=depth,
+        intrinsics=intrinsics, poses_c2w=poses, mask=depth > 0,
+        images=np.zeros(depth.shape + (3,), dtype=np.float32), is_metric=True,
+    )
+    prepared = PreparedViews(views=[], images=prediction.images, resolution=(WIDTH, HEIGHT),
+                             norm_type="dinov2", scene_name="s",
+                             view_names=[f"v{i}" for i in range(len(depth))],
+                             ground_truth={"poses_c2w": poses, "intrinsics": intrinsics})
+    path = tmp_path / "poses" / "pi3" / "s.npz"
+    export_poses(prediction, prepared, str(path))
+    saved = np.load(path)
+    assert np.allclose(saved["pred_poses_c2w"], poses) and np.allclose(saved["gt_poses_c2w"], poses)
+    assert list(saved["view_names"]) == ["v0", "v1", "v2"]
+    assert path.stat().st_size < 20_000
