@@ -77,6 +77,10 @@ def main():
     parser.add_argument("--logs", metavar="PREFIX",
                         help="Take every job whose log is logs/PREFIX-<jobid>.out")
     parser.add_argument("--name", help="Folder name for the merged result (default: from the runs)")
+    parser.add_argument("--link-name",
+                        help="Name of the link under final/<section>/ (default: the folder name). "
+                             "Runs that are compared with each other share a link name across "
+                             "sections, e.g. main/eth3d_130sets_native and calibrated/eth3d_130sets_native")
     parser.add_argument("--section", default="main",
                         help="Where under final/ to link it: main (default), mapanything_nomask, ...")
     parser.add_argument("--code", default=DEFAULT_CODE,
@@ -106,7 +110,7 @@ def main():
         sets = len({r["scene"] for r in records if r.get("status") == "ok"})
         name = f"{short}_{sets}sets_{size}"
     merged = os.path.join(RUNS, name)
-    link = os.path.join(FINAL, args.section, name)
+    link = os.path.join(FINAL, args.section, args.link_name or name)
     if not args.replace:
         for path in (merged, link):
             if os.path.lexists(path):

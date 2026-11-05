@@ -79,9 +79,8 @@ def main():
     # Final table at the benchmark's default settings: MapAnything unmasked
     # (as upstream scores it), every other model from the main runs.
     out += ["## 0. Final results at the default settings", "",
-            "Upstream protocol (all sets, native resolution, upstream precision), every",
-            "pixel scored for every model: MapAnything rows come from",
-            "`final/mapanything_nomask/`, the other models from `final/main/`.", ""]
+            "Upstream protocol (all sets, native resolution, upstream precision, images",
+            "only), every pixel scored for every model (MapAnything unmasked).", ""]
     datasets = main_datasets()
     finals = {}
     chinese = {}
@@ -99,28 +98,74 @@ def main():
     ranks = ranks.sort_values("mean rank").reset_index().rename(columns={"index": "model"})
     out += ["### Pose AUC@5 rank on each dataset", "", md(ranks), ""]
 
-    out += ["## 1. Main results (upstream protocol: all sets, native resolution)", "",
-            "MapAnything here is with its mask on (the setting these runs used); see",
-            "sections 0 and 2 for it unmasked.", ""]
+    out += ["## 1. Main results (upstream protocol: all sets, native resolution)", ""]
+    official_cols = {
+        "pose/auc_5": ("pose_auc_5 ↑", 2), "rays/err_deg": ("ray_dirs_err_deg ↓", 3),
+        "official/pointmaps_abs_rel": ("pointmaps_abs_rel ↓", 4),
+        "official/pointmaps_inlier_thres_103": ("pointmaps_inlier_103 ↑", 3),
+        "official/z_depth_abs_rel": ("z_depth_abs_rel ↓", 4),
+        "official/z_depth_inlier_thres_103": ("z_depth_inlier_103 ↑", 3),
+        "official/pose_ate_rmse": ("pose_ate_rmse ↓", 4),
+        "official/metric_scale_abs_rel": ("metric_scale_abs_rel ↓", 3),
+    }
     for name, _, en, _, n_sets in datasets:
         label = f"{en}, {n_sets} sets"
         path = os.path.join(FINAL, "main", name)
         df, ok = load(path)
         out += [f"### {label}", "", f"`final/main/{name}` — {config_line(path)}; "
                 f"{len(ok)}/{len(df)} records ok", "", md(model_table(ok)), ""]
+        if "official/z_depth_abs_rel" in ok:
+            t = ok.groupby("model")[list(official_cols)].mean()
+            t = t.loc[t["pose/auc_5"].sort_values(ascending=False).index]
+            t = pd.DataFrame({lab: t[c].round(d) for c, (lab, d) in official_cols.items()})
+            out += [f"Upstream's own definitions (`official/*`, computed by map-anything's code; "
+                    "metric_scale_abs_rel is meaningful only for metric-scale models):", "",
+                    md(t.reset_index()), ""]
 
-    nomask = sorted(glob.glob(os.path.join(FINAL, "mapanything_nomask", "*")))
+    calibrated = sorted(glob.glob(os.path.join(FINAL, "calibrated", "*")))
+    if calibrated:
+        out += ["## 1b. Calibrated: GT intrinsics given to the models that accept them", "",
+                "Same sets as section 1; the only change is the camera intrinsics as an",
+                "extra input. Differences are calibrated − images-only, ± standard error",
+                "over the paired sets.", ""]
+        rows = []
+        for path in calibrated:
+            name = os.path.basename(path)
+            _, cal = load(path)
+            _, img = load(os.path.join(FINAL, "main", name))
+            for model in sorted(cal.model.unique()):
+                m = img[img.model == model].merge(cal[cal.model == model], on="scene",
+                                                  suffixes=("_img", "_cal"))
+                assert (m.views_digest_img == m.views_digest_cal).all()
+                for key in ("pose/auc_5", "pose/rot_err_deg_median", "pose/trans_ang_err_deg_median",
+                            "rays/err_deg", "official/pointmaps_abs_rel", "official/z_depth_abs_rel",
+                            "metric/scale_abs_rel"):
+                    if key + "_cal" not in m or m[key + "_cal"].isna().all():
+                        continue
+                    d = m[key + "_cal"] - m[key + "_img"]
+                    rows.append({"dataset": name.split("_")[0], "model": model, "metric": key,
+                                 "images only": round(m[key + "_img"].mean(), 4),
+                                 "with intrinsics": round(m[key + "_cal"].mean(), 4),
+                                 "difference": round(d.mean(), 4),
+                                 "± se": round(d.std() / len(d) ** 0.5, 4)})
+                better = int((m["pose/auc_5_cal"] > m["pose/auc_5_img"]).sum())
+                worse = int((m["pose/auc_5_cal"] < m["pose/auc_5_img"]).sum())
+                rows.append({"dataset": name.split("_")[0], "model": model,
+                             "metric": "sets with higher / lower pose AUC",
+                             "images only": "", "with intrinsics": "",
+                             "difference": f"{better} / {worse} of {len(m)}", "± se": ""})
+        out += [md(pd.DataFrame(rows)), ""]
+
+    nomask = sorted(glob.glob(os.path.join(FINAL, "mask_comparison", "nomask_*")))
     if nomask:
-        out += ["## 2. MapAnything without its mask (as upstream's benchmark runs it)", "",
-                "Section 1 runs MapAnything through `infer()` with its edge/ambiguity mask;",
-                "upstream's benchmark calls the model directly and scores every pixel.", ""]
+        out += ["## 2. MapAnything with and without its own mask", "",
+                "`infer()` drops ambiguous and edge pixels by default; upstream's benchmark",
+                "(and section 1) scores every pixel. Earlier runs, same sets.", ""]
         rows = []
         for path in nomask:
-            name = os.path.basename(path)
+            name = os.path.basename(path)[len("nomask_"):]
             df, ok = load(path)
-            out += [f"`final/mapanything_nomask/{name}` — {config_line(path)}; "
-                    f"{len(ok)}/{len(df)} ok", "", md(model_table(ok)), ""]
-            _, masked = load(os.path.join(FINAL, "main", name))
+            _, masked = load(os.path.join(FINAL, "mask_comparison", f"masked_{name}"))
             for model in sorted(ok.model.unique()):
                 m = masked[masked.model == model].merge(ok[ok.model == model], on="scene",
                                                         suffixes=("_mask", "_nomask"))

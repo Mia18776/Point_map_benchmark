@@ -28,6 +28,8 @@ user `iwfa137h` (`/home/woody/iwfa/iwfa137h/...`).
 | `make_report_html.py` + `report_template.html` | writes `final/report.html` |
 | `results_intro.md`, `results_conclusions.md` | hand-written text of `RESULTS.md` ("what was tested", "conclusions") |
 | `findings.md` | hand-written analysis appended to `DETAILS.md` |
+| `agreement_analysis.py` | cross-model pose agreement as a GT-free signal, from the poses saved with `--export-poses`; writes `final/AGREEMENT.md` |
+| `metrics_manual.py` | the metrics manual (every results.csv column: meaning, direction, function, origin); refuses to run if a column is missing |
 
 ## Typical run
 

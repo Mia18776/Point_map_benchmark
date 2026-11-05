@@ -46,6 +46,67 @@ def dataset_block(name):
     return {"models": models, "scenes": scenes, "heat": heat}
 
 
+OFFICIAL = [("official/pointmaps_abs_rel", 4), ("official/pointmaps_inlier_thres_103", 3),
+            ("official/z_depth_abs_rel", 4), ("official/z_depth_inlier_thres_103", 3),
+            ("official/pose_ate_rmse", 4), ("official/metric_scale_abs_rel", 3)]
+
+
+def official_block(name):
+    """Mean of each official/* metric per model (upstream's definitions)."""
+    ok = final_rows(name)
+    if "official/z_depth_abs_rel" not in ok:
+        return None
+    out = []
+    for model, part in ok.groupby("model"):
+        row = {"name": NAMES.get(model, model), "auc": fnum(part["pose/auc_5"].mean(), 1),
+               "rays": fnum(part["rays/err_deg"].mean(), 3)}
+        for col, d in OFFICIAL:
+            value = part[col].mean() if col in part else None
+            if col == "official/metric_scale_abs_rel" and model not in METRIC_MODELS:
+                value = None  # upstream reports it for every model; meaningless here
+            row[col.split("/")[1]] = fnum(value, d)
+        out.append(row)
+    return sorted(out, key=lambda r: -r["auc"])
+
+
+def calibrated_block(name):
+    """Images-only vs GT-intrinsics runs of the same sets, per model."""
+    path = os.path.join(FINAL, "calibrated", name)
+    if not os.path.exists(os.path.join(path, "results.csv")):
+        return None
+    cal, img = ok_rows(path), final_rows(name)
+    out = []
+    for model in sorted(cal.model.unique()):
+        m = img[img.model == model].merge(cal[cal.model == model], on="scene", suffixes=("_i", "_c"))
+        d = m["pose/auc_5_c"] - m["pose/auc_5_i"]
+        out.append({
+            "name": NAMES.get(model, model), "sets": int(len(m)),
+            "auc_i": fnum(m["pose/auc_5_i"].mean(), 1), "auc_c": fnum(m["pose/auc_5_c"].mean(), 1),
+            "delta": fnum(d.mean(), 1), "delta_se": fnum(d.std() / len(d) ** 0.5, 1),
+            "better": int((d > 0).sum()), "worse": int((d < 0).sum()),
+            "rays_i": fnum(m["rays/err_deg_i"].mean(), 2), "rays_c": fnum(m["rays/err_deg_c"].mean(), 2),
+            "depth_i": fnum(m["official/z_depth_abs_rel_i"].mean(), 3),
+            "depth_c": fnum(m["official/z_depth_abs_rel_c"].mean(), 3),
+        })
+    return sorted(out, key=lambda r: -r["delta"])
+
+
+def agreement_summary(datasets):
+    """Cross-model agreement, from agreement_analysis.py (needs the saved poses)."""
+    import agreement_analysis
+
+    prefixes = {"eth3d": ("ETH3D", "run2-eth3d"), "tav2_wb": ("TartanAirV2-WB", "run2-tav2_wb")}
+    summary = {}
+    for _, key, _, _, _ in datasets:
+        if key in prefixes:
+            label, prefix = prefixes[key]
+            try:
+                agreement_analysis.analyse(label, prefix, summary)
+            except (FileNotFoundError, KeyError, IndexError):
+                continue  # no saved poses for this dataset
+    return [{"label": k, **v} for k, v in summary.items()]
+
+
 def crosscheck(datasets):
     rows = []
     eth3d = [d[0] for d in datasets if d[1] == "eth3d"]
@@ -71,9 +132,11 @@ def main():
     blocks = []
     for name, key, en, cn, n_sets in datasets:
         block = dataset_block(name)
-        block.update(key=key, label=en, kind=cn, sets=int(n_sets))
+        block.update(key=key, label=en, kind=cn, sets=int(n_sets),
+                     official=official_block(name), calibrated=calibrated_block(name))
         blocks.append(block)
-    data = {"datasets": blocks, "crosscheck": crosscheck(datasets)}
+    data = {"datasets": blocks, "crosscheck": crosscheck(datasets),
+            "agreement": agreement_summary(datasets)}
     template = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "report_template.html"),
                     encoding="utf-8").read()
     html = template.replace("/*__DATA__*/null", json.dumps(data, ensure_ascii=False))

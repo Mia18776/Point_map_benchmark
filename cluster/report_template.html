@@ -79,6 +79,10 @@ svg .base { stroke: var(--axis); stroke-width: 1; }
 svg .bar { fill: var(--accent); }
 svg .err { stroke: var(--ink-2); stroke-width: 1.5; }
 svg .dot { fill: var(--accent); stroke: var(--surface); stroke-width: 2; }
+svg .dot0 { fill: var(--muted); stroke: var(--surface); stroke-width: 2; }
+svg .link { stroke: var(--axis); stroke-width: 2; }
+.key { display: flex; gap: 16px; font-size: 13px; color: var(--ink-2); align-items: center; flex-wrap: wrap; }
+.key i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
 svg .hit { fill: transparent; cursor: default; }
 svg .hit:hover + .bar, svg .bar:hover { opacity: .85; }
 .heat td { text-align: center; padding: 6px 4px; min-width: 52px; border-bottom: 2px solid var(--surface); border-right: 2px solid var(--surface); }
@@ -110,6 +114,7 @@ footer { color: var(--muted); font-size: 13px; }
     <div><b>真实场景最强的快速模型</b><span>DA3 和 Pi3-X（ETH3D 第 2、第 3），但它们在合成场景上明显变差。</span></div>
     <div><b>需要真实尺度（米）</b><span>MapAnything：尺度误差最小，合成场景上位姿第 1，相机内参也估得最准。</span></div>
     <div><b>点云最准</b><span>Pi3-X（ETH3D 上点云误差和深度误差都最小）。</span></div>
+    <div><b>知道相机焦距时</b><span>把它提供给模型：Pi3-X 在 ETH3D 上从 72.4 提高到 86.1，超过 MASt3R；三个能接收内参的模型都大幅提升。</span></div>
   </div>
 </section>
 
@@ -171,6 +176,29 @@ footer { color: var(--muted); font-size: 13px; }
 </section>
 
 <section>
+  <h2>提供真实相机内参，位姿能好多少</h2>
+  <p class="sub">默认只给模型照片。实际使用时，相机焦距常常是已知的（照片文件里通常有记录）。能接收内参的 3 个模型，在同样的组上再跑一次，额外提供真实内参。</p>
+  <div class="key"><span><i style="background:var(--muted)"></i>只给照片</span><span><i style="background:var(--accent)"></i>提供真实内参</span></div>
+  <div class="grid2" id="calib"></div>
+  <div class="tablewrap"><table id="tbl-calib"></table></div>
+  <div class="howto"><strong>怎么看：</strong>每一行是一个模型，灰点是只给照片的位姿分数，蓝点是提供内参后的分数，连线越长提升越大。表里"变好 / 变差"是逐组比较的结果。提供内参后，三个模型在两个数据集上都明显提升；Pi3-X 在 ETH3D 上超过了 MASt3R，在 TartanAirV2 上 50 组里没有一组变差。改善主要来自平移方向：焦距估错时，"相机往前走"和"镜头拉近"很难区分。这些结果不计入上面的排名，因为提供内参等于提前告诉了模型一部分答案。</div>
+</section>
+
+<section>
+  <h2>官方定义的指标</h2>
+  <p class="sub">用 map-anything 官方评测的定义和官方代码计算，可以直接和 MapAnything 论文里的数字比较。和上面"完整结果表"的深度误差定义不同：官方不单独对齐深度的尺度，所以数字更严格。</p>
+  <div id="official"></div>
+  <div class="howto"><strong>每一列：</strong>点云误差和深度误差是把所有照片一起按平均距离归一化后的相对误差；内点率是误差在 3% 以内的比例；ATE 是相机位置误差（归一化单位）；尺度误差只对输出真实尺度的模型显示。</div>
+</section>
+
+<section>
+  <h2>没有真值时，能判断该信哪个模型吗</h2>
+  <p class="sub">实际使用时没有真值。对每一组，比较 7 个模型给出的相机位姿，看每个模型和其他模型差多少（"离群程度"），再用真值检验这个信号准不准。</p>
+  <div class="tablewrap"><table id="tbl-agree"></table></div>
+  <div class="howto"><strong>结论：</strong>和其他模型意见差别越大的模型，误差通常也越大，可以用来"报警"：最离群的模型在 ETH3D 上大多数时候确实是这组最差的。但按"最合群"挑模型，平均分只和最好的单个模型持平，没有超过它，离理论上限还很远。推测原因是多个模型常常一起犯同样的错。</div>
+</section>
+
+<section>
   <h2>各场景表现：哪里容易失败</h2>
   <p class="sub">每一格是该模型在这个场景 10 组上的平均位姿 AUC@5。颜色越深，分数越高。</p>
   <div class="legend"><span>0</span><span class="ramp"></span><span>100</span></div>
@@ -205,7 +233,7 @@ footer { color: var(--muted); font-size: 13px; }
   <h2>结果可信吗：和官方脚本的核对</h2>
   <p class="sub">在同样的 130 组上，分别用官方的 benchmark 脚本和我们的评测框架跑 Pi3 和 VGGT，比较两边都有的两个指标。</p>
   <div class="tablewrap"><table id="tbl-cross"></table></div>
-  <div class="howto"><strong>两边完全一致</strong>，13 个场景逐个比较，差值都是 0.0000。说明我们给模型的照片、模型的运行方式、指标的计算方式都和官方相同。另外，每个模型的内部自检指标都接近 0，说明坐标系的转换没有出错。</div>
+  <div class="howto"><strong>两边完全一致</strong>，13 个场景逐个比较，差值都是 0.0000。另外，官方定义的全部 8 个指标（见"官方定义的指标"）也在 130 组上逐组核对过，Pi3 和 VGGT 单组的差别都小于 0.00003，只是 GPU 浮点舍入。说明我们给模型的照片、模型的运行方式、指标的计算方式都和官方相同。每个模型的内部自检指标也都接近 0，说明坐标系的转换没有出错。</div>
 </section>
 
 <footer>
@@ -342,6 +370,59 @@ function cross() {
   document.getElementById("tbl-cross").innerHTML = h + "</tbody>";
 }
 
+function dumbbell(svgId, rows) {
+  const svg = document.getElementById(svgId);
+  const W = 440, rowH = 34, left = 150, right = 20, top = 8, bottom = 26;
+  const H = top + rowH * rows.length + bottom;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`); svg.setAttribute("width", "100%");
+  const x = v => left + (W - left - right) * v / 100;
+  [0, 25, 50, 75, 100].forEach(t => {
+    el("line", { x1: x(t), x2: x(t), y1: top, y2: H - bottom, class: t === 0 ? "base" : "grid" }, svg);
+    el("text", { x: x(t), y: H - 8, "text-anchor": "middle", class: "ax" }, svg, t);
+  });
+  rows.forEach((r, i) => {
+    const cy = top + i * rowH + rowH / 2;
+    el("text", { x: left - 10, y: cy + 4, "text-anchor": "end", "font-size": 13 }, svg, r.name);
+    el("line", { x1: x(r.auc_i), x2: x(r.auc_c), y1: cy, y2: cy, class: "link" }, svg);
+    el("circle", { cx: x(r.auc_i), cy, r: 6, class: "dot0" }, svg);
+    el("circle", { cx: x(r.auc_c), cy, r: 6, class: "dot" }, svg);
+    el("text", { x: x(r.auc_c) + 10, y: cy + 4, class: "val" }, svg, r.auc_c.toFixed(1));
+    const hit = el("rect", { x: 0, y: cy - rowH / 2, width: W, height: rowH, class: "hit" }, svg);
+    hover(hit, `<b>${r.name}</b><br>只给照片：${r.auc_i.toFixed(1)}<br>提供内参：${r.auc_c.toFixed(1)}（${r.delta >= 0 ? "+" : ""}${r.delta.toFixed(1)} ± ${r.delta_se.toFixed(1)}）<br>${r.sets} 组里 ${r.better} 组变好，${r.worse} 组变差`);
+  });
+}
+
+function calibTable(blocks) {
+  let h = "<thead><tr><th>数据集</th><th>模型</th><th>位姿 AUC@5（只给照片 → 提供内参）</th><th>变化</th><th>变好 / 变差的组</th><th>内参误差 °</th><th>官方深度误差</th></tr></thead><tbody>";
+  blocks.forEach(ds => (ds.calibrated || []).forEach(r => {
+    h += `<tr><td style="text-align:left">${ds.label}</td><td style="text-align:left">${r.name}</td><td>${r.auc_i.toFixed(1)} → <b>${r.auc_c.toFixed(1)}</b></td><td class="best">+${r.delta.toFixed(1)} <span class="dim">± ${r.delta_se.toFixed(1)}</span></td><td>${r.better} / ${r.worse}（共 ${r.sets}）</td><td>${r.rays_i.toFixed(2)} → ${r.rays_c.toFixed(2)}</td><td>${r.depth_i.toFixed(3)} → ${r.depth_c.toFixed(3)}</td></tr>`;
+  }));
+  document.getElementById("tbl-calib").innerHTML = h + "</tbody>";
+}
+
+function officialTable(ds) {
+  const cols = [["auc", "pose AUC@5 ↑", 1], ["rays", "内参误差 ° ↓", 3], ["pointmaps_abs_rel", "点云误差 ↓", 4],
+    ["pointmaps_inlier_thres_103", "点云 3% 内点率 ↑", 3], ["z_depth_abs_rel", "深度误差 ↓", 4],
+    ["z_depth_inlier_thres_103", "深度 3% 内点率 ↑", 3], ["pose_ate_rmse", "ATE ↓", 4], ["metric_scale_abs_rel", "尺度误差 ↓", 3]];
+  let h = "<thead><tr><th>模型</th>" + cols.map(c => `<th>${c[1]}</th>`).join("") + "</tr></thead><tbody>";
+  ds.official.forEach(r => { h += `<tr><td style="text-align:left">${r.name}</td>` + cols.map(c => `<td${r[c[0]] === null ? ' class="dim"' : ""}>${fmt(r[c[0]], c[2])}</td>`).join("") + "</tr>"; });
+  return h + "</tbody>";
+}
+
+function agreeTable() {
+  if (!DATA.agreement.length) return;
+  const names = DATA.agreement[0].strategies.map(s => s.name);
+  const zh = { "always the best single model": "始终用最好的单个模型", "per set: the model that agrees most with the others": "每组挑和其他模型最一致的", "per set: the most self-consistent model": "每组挑自身最一致的", "per set: the truly best model (oracle, needs GT)": "每组挑真正最好的（理论上限，需要真值）" };
+  const tr = n => { for (const k in zh) if (n.startsWith(k)) return zh[k] + n.slice(k.length); return n; };
+  let h = "<thead><tr><th></th>" + DATA.agreement.map(a => `<th>${a.label}（${a.sets} 组）</th>`).join("") + "</tr></thead><tbody>";
+  h += "<tr><td style=\"text-align:left\">离群程度和位姿分数的相关系数</td>" + DATA.agreement.map(a => `<td>${a.rho.toFixed(2)}</td>`).join("") + "</tr>";
+  h += "<tr><td style=\"text-align:left\">最离群的模型就是这组最差模型的比例</td>" + DATA.agreement.map(a => `<td>${a.worst_hit}%<span class="dim">（随机 ${a.chance}%）</span></td>`).join("") + "</tr>";
+  names.forEach((n, i) => {
+    h += `<tr><td style="text-align:left">平均位姿 AUC：${tr(n)}</td>` + DATA.agreement.map(a => `<td>${a.strategies[i].auc.toFixed(1)}</td>`).join("") + "</tr>";
+  });
+  document.getElementById("tbl-agree").innerHTML = h + "</tbody>";
+}
+
 function title(ds) { return `${ds.label}（${ds.kind ? ds.kind + "，" : ""}${ds.sets} 组）`; }
 DATA.datasets.forEach(ds => {
   const id = ds.key.replace(/[^a-z0-9]/gi, "");
@@ -354,7 +435,18 @@ DATA.datasets.forEach(ds => {
   bars("bars-" + id, ds);
   table("tbl-" + id, ds);
   heat("heat-" + id, ds);
+  if (ds.calibrated) {
+    document.getElementById("calib").insertAdjacentHTML("beforeend",
+      `<div><h3>${title(ds)}</h3><svg id="calib-${id}" role="img" aria-label="${ds.label} 提供内参前后的位姿分数"></svg></div>`);
+    dumbbell("calib-" + id, ds.calibrated);
+  }
+  if (ds.official) {
+    document.getElementById("official").insertAdjacentHTML("beforeend",
+      `<h3>${title(ds)}</h3><div class="tablewrap"><table>${officialTable(ds)}</table></div>`);
+  }
 });
+calibTable(DATA.datasets);
+agreeTable();
 scatter();
 cross();
 </script>
