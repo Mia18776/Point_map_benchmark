@@ -70,7 +70,15 @@ def analyse(dataset, prefix, summary=None):
     scores = scores[scores.status == "ok"].set_index(["scene", "model"])
     models = sorted(runs)
     rows = []
-    scenes = sorted({os.path.basename(p)[:-4] for p in glob.glob(os.path.join(runs[models[0]], "poses", "*", "*.npz"))})
+    # Only sets every model finished and saved poses for: comparing a model
+    # with "the others" needs all of them on the same views.
+    scenes = sorted(
+        set.intersection(*(
+            {os.path.basename(p)[:-4] for p in glob.glob(os.path.join(runs[m], "poses", m, "*.npz"))}
+            for m in models
+        ))
+        & set.intersection(*(set(scores.xs(m, level="model").index) for m in models))
+    )
     for scene in scenes:
         rel = {}
         for m in models:

@@ -326,17 +326,7 @@ def evaluate_pointmaps_sim3(
     # accuracy searched only the GT at the pixels a model predicted, a model
     # that masks more would get a sparser reference, hence larger
     # nearest-neighbour distances on identical per-point quality.
-    accuracy = chamfer_metrics(pred_aligned, gt_reference, chamfer_max_points, seed)
-    completeness = chamfer_metrics(pred_aligned, gt_reference, chamfer_max_points, seed)
-    chamfer = {
-        "accuracy_mean": accuracy["accuracy_mean"],
-        "accuracy_median": accuracy["accuracy_median"],
-        "completeness_mean": completeness["completeness_mean"],
-        "completeness_median": completeness["completeness_median"],
-        "chamfer_mean": _safe(
-            0.5 * (accuracy["accuracy_mean"] + completeness["completeness_mean"])
-        ),
-    }
+    chamfer = chamfer_metrics(pred_aligned, gt_reference, chamfer_max_points, seed)
     for key, value in chamfer.items():
         out[f"sim3/{key}"] = value
         if gt_extent > 0:

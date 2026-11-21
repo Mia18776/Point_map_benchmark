@@ -138,7 +138,7 @@ MODEL_REGISTRY: Dict[str, ModelSpec] = {
         is_metric=False,
         requires_cuda=True,
         install_hint="Vendored in mapanything.",
-        notes="MapAnything's Pi3 variant; included as an extra baseline.",
+        notes="Pi3-X by the Pi3 authors (HF 'yyfz233/Pi3X'), vendored in mapanything.",
     ),
     "da3": ModelSpec(
         key="da3",

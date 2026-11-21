@@ -14,7 +14,7 @@
 #   MODELS="mapanything pi3" sbatch --export=ALL run_benchmark.slurm
 #   DATASET=eth3d IMAGE_SIZE=native sbatch --export=ALL run_benchmark.slurm   # per-model resolution
 #   sbatch -p v100 --gres=gpu:v100:1 run_benchmark.slurm    # other GPU type
-#   CODE_DIR=$HOME/Point_map_benchmark_fix sbatch --export=ALL run_benchmark.slurm
+#   CODE_DIR=$HOME/other_checkout sbatch --export=ALL run_benchmark.slurm
 #
 # SCENES_ROOT holds one sub-folder per scene (images/*.png, optional gt.npz).
 
@@ -59,7 +59,7 @@ SIZE_ARGS="--image-size $IMAGE_SIZE"
 echo "job $SLURM_JOB_ID on $(hostname), models: $MODELS, data: $DATASET, image size: $IMAGE_SIZE"
 
 # CODE_DIR picks the checkout to run, e.g. a git worktree with a fix in it.
-cd ${CODE_DIR:-$HOME/Point_map_benchmark}
+cd ${CODE_DIR:-$HOME/Point_map_benchmark_sets}
 echo "code: $(pwd) @ $(git rev-parse --short HEAD)"
 python scripts/run_benchmark.py \
     $DATA_ARGS \

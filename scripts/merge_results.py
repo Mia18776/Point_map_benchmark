@@ -33,7 +33,7 @@ PER_RUN_SETTINGS = ("models", "timestamp")
 
 
 def merge(run_dirs):
-    """Return ``(records, config, notes)`` for the given run directories."""
+    """Return ``(records, config)`` for the given run directories."""
     records, configs, partial = [], [], []
     for run_dir in run_dirs:
         results = os.path.join(run_dir, "results.json")
